@@ -1,0 +1,94 @@
+{
+  "name": "bb-plugin-project-first-sidebar",
+  "version": "0.4.0",
+  "type": "module",
+  "description": "Project-first sidebar for BB with project filters, custom icons and familiar thread controls.",
+  "engines": {
+    "bb": ">=0.48.1",
+    "bbPluginSdk": ">=0.6.104 <0.7"
+  },
+  "bb": {
+    "name": "Project-first sidebar [Experimental]",
+    "description": "Organize BB threads by project, section or machine, with shared project filters and custom icons.",
+    "branding": {
+      "icon": "ListView"
+    },
+    "server": "./server.ts",
+    "app": "./app.tsx",
+    "skills": [
+      "skills"
+    ]
+  },
+  "keywords": [
+    "bb-plugin"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --config vitest.config.ts --maxWorkers=1",
+    "check:package": "node scripts/check-package.mjs"
+  },
+  "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
+    "@radix-ui/react-compose-refs": "^1.1.3",
+    "@radix-ui/react-slot": "^1.3.0",
+    "jotai": "^2.19.0",
+    "zod": "^4.3.6",
+    "@radix-ui/react-checkbox": "^1.3.7"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.6.104",
+    "@testing-library/dom": "^10.4.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "better-sqlite3": "12.10.0",
+    "cron-parser": "^5.5.0",
+    "hono": "4.11.9",
+    "jsdom": "^29.0.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "sonner": "^1.7.4",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "vitest": "^4.1.1",
+    "@radix-ui/react-context-menu": "^2.3.3",
+    "@radix-ui/react-dialog": "^1.1.19",
+    "@radix-ui/react-dropdown-menu": "^2.1.20",
+    "@radix-ui/react-tooltip": "^1.2.12",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "tailwind-merge": "^3.4.0",
+    "bb-app": "0.48.1"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kuntashov/bb-plugin-project-first-sidebar.git"
+  },
+  "homepage": "https://github.com/kuntashov/bb-plugin-project-first-sidebar#readme",
+  "bugs": {
+    "url": "https://github.com/kuntashov/bb-plugin-project-first-sidebar/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "files": [
+    "dist/",
+    "app.tsx",
+    "server.ts",
+    "app/",
+    "components/",
+    "lib/",
+    "hooks/",
+    "shared/",
+    "skills/",
+    "UPSTREAM.md",
+    "PLUGIN_OVERVIEW.md",
+    "!**/*.test.*"
+  ]
+}

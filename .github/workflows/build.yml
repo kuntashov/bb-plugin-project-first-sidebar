@@ -1,0 +1,93 @@
+name: Build and release plugin
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install locked dependencies
+        run: npm ci
+        timeout-minutes: 10
+      - name: Typecheck
+        run: npm run typecheck
+        env:
+          NODE_OPTIONS: --max-old-space-size=1024
+      - name: Tests, including public SDK boundary
+        run: npm test
+        env:
+          NODE_OPTIONS: --max-old-space-size=1024
+      - name: Build with pinned BB toolchain
+        run: npm run build
+      - name: Validate and pack the release payload
+        run: |
+          npm run check:package
+          mkdir artifacts
+          npm pack --ignore-scripts --json --pack-destination artifacts > artifacts/package.json
+          (cd artifacts && sha256sum ./*.tgz > SHA256SUMS)
+          node -e 'const fs=require("node:fs"); fs.writeFileSync("artifacts/BUILD.json",JSON.stringify({commit:process.env.GITHUB_SHA,repository:process.env.GITHUB_REPOSITORY,event:process.env.GITHUB_EVENT_NAME,node:process.version,bb:JSON.parse(fs.readFileSync("node_modules/bb-app/package.json")).version,sdk:JSON.parse(fs.readFileSync("node_modules/@get-bb/plugin-sdk/package.json")).version},null,2)+"\n")'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: plugin-${{ github.sha }}
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: plugin-${{ github.sha }}
+          path: artifacts
+      - name: Verify artifact checksums
+        working-directory: artifacts
+        run: sha256sum -c SHA256SUMS
+      - name: Verify registry state
+        id: registry
+        run: node scripts/published-state.mjs
+      - name: Publish through npm trusted publishing
+        if: steps.registry.outputs.already_published != 'true'
+        run: npm publish artifacts/*.tgz --access public --provenance --ignore-scripts
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo 'Release exists; preserving existing assets.'
+          else
+            gh release create "$GITHUB_REF_NAME" artifacts/*.tgz artifacts/SHA256SUMS artifacts/BUILD.json --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+          fi

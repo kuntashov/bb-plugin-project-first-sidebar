@@ -1,0 +1,2 @@
+// Tiny generated 2x1 red/blue RGBA PNG, valid CRC and deflate.
+export const TINY_PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAYAAAD0In+KAAAADklEQVR4nGP4z8AAQv8BD/kD/YURmXYAAAAASUVORK5CYII=';

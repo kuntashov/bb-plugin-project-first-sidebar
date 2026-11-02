@@ -1,0 +1,17 @@
+{
+  "release": "desktop-v0.48.1",
+  "commit": "e003e9510cbfd3bb6c26a28630b46ffb1c242a44",
+  "count": 180,
+  "sources": [
+    {
+      "path": "packages/shared-ui/src/components/ui/icon.tsx",
+      "sha256": "b17f9838cbd71c5aebd750d6f55f3ff5fdec801ea180bd72ebe04084ed39506f",
+      "gitBlob": "6a0c19f6630061b17e078e96bd8f39de17f5f80f"
+    },
+    {
+      "path": "packages/shared-ui/src/components/ui/icon-registry.ts",
+      "sha256": "21da8ae0812e0e351c65b8bc92ef14f038ab014c1bf80508df0f68d26d7eb43d",
+      "gitBlob": "32e2a6b8e5535e8d9c677b8825852fd406fe7642"
+    }
+  ]
+}
