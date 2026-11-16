@@ -62,4 +62,4 @@ Derived from BB's MIT-licensed Thread-list and shared UI. Original attribution i
 
 ## Quick thread navigation
 
-The “Найти тред по фильтру” command opens a keyboard-driven filter → thread picker. Match literal title fragments separated by `/`, with highlighted matches. Alt+A includes the complete archive. Enter opens the thread, applies the project filter and focuses its sidebar row. [Usage and keyboard controls](docs/quick-thread-search.md).
+The “Найти тред по фильтру” command opens a keyboard-driven filter → thread picker. Match literal title fragments separated by `/`, optionally prefixed with `project:title`. Russian and English keyboard layouts are both searched, with highlighted matches. Alt+A includes the complete archive. Enter opens the thread, applies the project filter and focuses its sidebar row. [Usage and keyboard controls](docs/quick-thread-search.md).

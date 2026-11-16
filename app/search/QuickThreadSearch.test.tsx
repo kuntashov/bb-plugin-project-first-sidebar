@@ -98,6 +98,52 @@ describe("keyboard quick navigation", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
     expect(windowFilterStore.getSnapshot().activeFilterId).toBe("all");
   });
+  it("keeps filter rows compact and supports selecting a filter in the other layout", async () => {
+    await mount();
+    const row = screen.getByRole("option", { name: "Рабочие" });
+    expect(Number.parseInt(row.style.minHeight)).toBeLessThanOrEqual(32);
+    const input = screen.getByRole("combobox", { name: "Выбрать фильтр" });
+    fireEvent.change(input, { target: { value: "hf,jxbt" } });
+    expect(screen.getAllByRole("option")).toHaveLength(1);
+    expect(screen.getByRole("option").textContent).toBe("Рабочие");
+    fireEvent.keyDown(input, { key: "Enter" });
+    await screen.findByRole("combobox", { name: "Найти тред" });
+    await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(2));
+    expect(Number.parseInt(screen.getAllByRole("option")[0].style.height)).toBeLessThanOrEqual(44);
+  });
+  it("filters and highlights effective project separately from title, preserving the chosen filter", async () => {
+    const target = entry({ id: "child", projectId: "other", parentThreadId: "parent", title: "Настройка сравнения" });
+    const parent = entry({ id: "parent", projectId: "app", title: "Родитель" });
+    const foreign = entry({ id: "foreign", projectId: "other", title: "Настройка сравнения" });
+    const projects = [{ ...project, name: "Admin" }, { ...project, id: "other", name: "Home" }];
+    await mount({ sdk: { subscribe: () => () => {}, projects: { list: async () => projects }, threads: {
+      list: async ({ offset } = {}) => offset ? [] : [target, parent, foreign],
+    } } });
+    const input = await chooseFilter();
+    fireEvent.change(input, { target: { value: "фвь:на/сра" } });
+    const row = screen.getByRole("option");
+    expect(row.textContent).toBe("Настройка сравненияAdmin");
+    expect([...row.querySelectorAll("mark")].map((mark) => mark.textContent)).toEqual(["На", "сра", "Adm"]);
+    fireEvent.change(input, { target: { value: "home:на" } });
+    expect(screen.queryByRole("option")).toBeNull();
+    expect(windowFilterStore.getSnapshot().activeFilterId).toBe("all");
+  });
+  it("keeps compact virtual rows selectable beyond the first screen and after narrowing", async () => {
+    const rows = Array.from({ length: 60 }, (_, index) => entry({ id: `row-${index}`, title: `Server ${index}`, updatedAt: 100 - index }));
+    await mount({ sdk: { subscribe: () => () => {}, projects: { list: async () => [project] }, threads: {
+      list: async ({ offset } = {}) => offset ? [] : rows,
+    } } });
+    const input = await chooseFilter();
+    fireEvent.keyDown(input, { key: "ArrowUp" });
+    const last = screen.getByRole("option", { selected: true });
+    expect(last.getAttribute("title")).toBe("Server 59");
+    expect(last.getAttribute("aria-posinset")).toBe("60");
+    expect(screen.getAllByRole("option").length).toBeLessThan(16);
+    expect(input.getAttribute("aria-activedescendant")).toBe(last.id);
+    fireEvent.change(input, { target: { value: "фзз:ыукмук/ 1" } });
+    await waitFor(() => expect(screen.getByRole("option", { selected: true }).getAttribute("title")).toBe("Server 1"));
+    expect(screen.getAllByRole("option")).toHaveLength(11);
+  });
   it("toggles the complete archive with Alt+A, preserves the phrase and resets on a new dialog", async () => {
     const { list } = await mount();
     const input = await chooseFilter();

@@ -10,7 +10,7 @@ import { useWindowFilterSnapshot } from "../filters/use-filter-snapshot.js";
 import { useFilterDocumentSync } from "../filters/use-filter-document-sync.js";
 import { usePreferencesSync } from "../preferences/PreferencesSync.js";
 import type { FilterIcon as IconDefinition } from "../../shared/filter-icons.js";
-import { changesSearchMetadata, effectiveProject, filterProjectIds, matchTitle, rawTitle, type MatchRange, type SearchThread } from "./search-model.js";
+import { changesSearchMetadata, effectiveProject, filterProjectIds, matchThreadQuery, matchTitle, rawTitle, type MatchRange, type SearchThread } from "./search-model.js";
 import { useSearchData } from "./use-search-data.js";
 import { useSearchNavigation, type PreparedSelection } from "./use-search-navigation.js";
 import "./search.css";
@@ -31,9 +31,10 @@ function Highlight({ text, ranges }: { text: string; ranges: readonly MatchRange
     return <span key={range.start}>{prefix}<mark>{text.slice(range.start, range.end)}</mark></span>;
   })}{text.slice(offset)}</>;
 }
-interface Option { id: string; name: string; icon?: IconDefinition; thread?: SearchThread; detail?: string; ranges: MatchRange[] }
-const ROW_HEIGHT = 64;
-const LIST_HEIGHT = 320;
+interface Option { id: string; name: string; icon?: IconDefinition; thread?: SearchThread; detail?: string; detailRanges?: MatchRange[]; ranges: MatchRange[] }
+const FILTER_ROW_HEIGHT = 32;
+const THREAD_ROW_HEIGHT = 44;
+const LIST_HEIGHT = 308;
 
 function SearchSession({ prepare, accept, close }: {
   prepare: ReturnType<typeof useSearchNavigation>["prepare"];
@@ -98,9 +99,10 @@ function SearchSession({ prepare, accept, close }: {
         if (!projectIds.has(projectId)) return [];
         const name = titles.get(rawTitle(thread));
         if (name === undefined) return [];
-        const ranges = matchTitle(name, query);
-        if (ranges === null) return [];
-        return [{ id: thread.id, name, thread, detail: `${projectNames.get(projectId) ?? projectId}${thread.archivedAt !== null ? " · Архив" : ""}`, ranges }];
+        const projectName = projectNames.get(projectId) ?? projectId;
+        const match = matchThreadQuery(name, projectName, query);
+        if (match === null) return [];
+        return [{ id: thread.id, name, thread, detail: `${projectName}${thread.archivedAt !== null ? " · Архив" : ""}`, ranges: match.titleRanges, detailRanges: match.projectRanges }];
       }).sort((a, b) => b.thread!.updatedAt - a.thread!.updatedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
       const collisions = new Map<string, number>();
       for (const option of options) { const key = JSON.stringify([option.name, option.detail]); collisions.set(key, (collisions.get(key) ?? 0) + 1); }
@@ -125,9 +127,9 @@ function SearchSession({ prepare, accept, close }: {
       element.querySelector<HTMLElement>('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
       return;
     }
-    const top = selectedIndex * ROW_HEIGHT;
+    const top = selectedIndex * THREAD_ROW_HEIGHT;
     if (top < element.scrollTop) element.scrollTop = top;
-    else if (top + ROW_HEIGHT > element.scrollTop + LIST_HEIGHT) element.scrollTop = top + ROW_HEIGHT - LIST_HEIGHT;
+    else if (top + THREAD_ROW_HEIGHT > element.scrollTop + LIST_HEIGHT) element.scrollTop = top + THREAD_ROW_HEIGHT - LIST_HEIGHT;
     setScrollTop(element.scrollTop);
   }, [selectionKey, selectedIndex, options.length, query, filterId]);
   useEffect(() => { input.current?.focus(); }, []);
@@ -179,8 +181,8 @@ function SearchSession({ prepare, accept, close }: {
     }
   };
   const loading = filterId !== null && !source.error && (!source.activeReady || !titlesReady);
-  const start = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - 2);
-  const indices = new Set(Array.from({ length: Math.min(options.length - start, 10) }, (_, index) => start + index));
+  const start = Math.max(0, Math.floor(scrollTop / THREAD_ROW_HEIGHT) - 2);
+  const indices = new Set(Array.from({ length: Math.min(options.length - start, Math.ceil(LIST_HEIGHT / THREAD_ROW_HEIGHT) + 4) }, (_, index) => start + index));
   if (filterId === null) options.forEach((_, index) => indices.add(index));
   if (selected) indices.add(selectedIndex); // aria-activedescendant always references a mounted option.
   const failure = error ?? modelError ?? (filterId !== null ? source.error : null) ?? snapshot.errorMessage;
@@ -192,7 +194,7 @@ function SearchSession({ prepare, accept, close }: {
       </span> : null}
       <Input ref={input} role="combobox" aria-label={filterId === null ? "Выбрать фильтр" : "Найти тред"}
         aria-autocomplete="list" aria-expanded="true" aria-controls={listId} aria-activedescendant={selected ? `${listId}-${selectedIndex}` : undefined}
-        placeholder={filterId === null ? "Название фильтра…" : "Название треда, части через /…"}
+        placeholder={filterId === null ? "Название фильтра…" : "Тред или проект:тред, части через /…"}
         value={query} onChange={(event) => { setQuery(event.target.value); setSelectedId(null); setError(null); }} disabled={submitting} autoComplete="off" />
       {filterId !== null ? <button type="button" aria-label="Включать архивные" aria-pressed={includeArchived}
         title="Включать архивные (Alt+A)" disabled={submitting}
@@ -206,19 +208,19 @@ function SearchSession({ prepare, accept, close }: {
     {failure ? <div role="alert" className="text-sm text-destructive">{failure}</div> : null}
     {filterId !== null && includeArchived && source.archiveError ? <div role="alert" className="text-sm text-destructive">Не удалось добавить архив: {source.archiveError}</div> : null}
     <div id={listId} ref={list} role="listbox" aria-label={filterId === null ? "Фильтры" : "Треды"} aria-busy={loading}
-      className="relative mt-2 overflow-y-auto" style={{ height: LIST_HEIGHT }} onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}>
-      <div style={{ height: filterId === null ? undefined : options.length * ROW_HEIGHT, position: "relative" }}>
+      className="relative mt-2 overflow-y-auto" style={{ maxHeight: LIST_HEIGHT, height: filterId === null ? undefined : LIST_HEIGHT }} onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}>
+      <div style={{ height: filterId === null ? undefined : options.length * THREAD_ROW_HEIGHT, position: "relative" }}>
         {[...indices].sort((a, b) => a - b).map((index) => {
           const option = options[index];
           if (!option) return null;
           return <div key={option.id} id={`${listId}-${index}`} role="option" aria-selected={index === selectedIndex}
             aria-posinset={index + 1} aria-setsize={options.length} title={option.name}
-            style={filterId === null ? { minHeight: ROW_HEIGHT, width: "100%" } : { position: "absolute", top: index * ROW_HEIGHT, height: ROW_HEIGHT, width: "100%" }}
+            style={filterId === null ? { minHeight: FILTER_ROW_HEIGHT, width: "100%" } : { position: "absolute", top: index * THREAD_ROW_HEIGHT, height: THREAD_ROW_HEIGHT, width: "100%" }}
             className="flex cursor-pointer items-center gap-2 rounded px-2 py-1 text-sm"
             onMouseDown={(event) => event.preventDefault()} onClick={() => { void select(option); }}>
             {!option.thread ? option.id === ALL_FILTER_ID ? <ClearFilterIcon /> : <FilterIcon icon={option.icon} /> : null}
-            <span className="min-w-0 flex-1"><span className="block break-words whitespace-pre-wrap" style={filterId === null ? undefined : { maxHeight: 40, overflowY: "auto" }}><Highlight text={option.name} ranges={option.ranges} /></span>
-              {option.detail ? <span className="block truncate text-xs text-muted-foreground">{option.detail}</span> : null}</span>
+            <span className="min-w-0 flex-1"><span className={filterId === null ? "block break-words whitespace-pre-wrap leading-5" : "block truncate whitespace-pre leading-5"}><Highlight text={option.name} ranges={option.ranges} /></span>
+              {option.detail ? <span title={option.detail} className="block truncate text-xs text-muted-foreground"><Highlight text={option.detail} ranges={option.detailRanges ?? []} /></span> : null}</span>
           </div>;
         })}
       </div>
@@ -284,7 +286,7 @@ export function QuickThreadSearch() {
     }).finally(() => { if (operation.current === commitOperation) committing.current = false; });
   };
   return <Dialog open={open} onOpenChange={(next) => { if (!next) cancel(); }}>
-    <DialogContent className="sm:max-w-2xl" onCloseAutoFocus={(event) => event.preventDefault()} onAfterCloseAutoFocus={afterClose}>
+    <DialogContent className="sm:max-w-xl" onCloseAutoFocus={(event) => event.preventDefault()} onAfterCloseAutoFocus={afterClose}>
       <DialogHeader><DialogTitle>Найти тред по фильтру</DialogTitle><DialogDescription className="sr-only">Выберите фильтр, затем тред. Enter — выбрать, Escape — закрыть.</DialogDescription></DialogHeader>
       {open ? <SearchSession key={session} prepare={(selection, signal) => {
         operation.current?.abort();
