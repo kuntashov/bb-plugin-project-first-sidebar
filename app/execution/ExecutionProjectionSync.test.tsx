@@ -35,3 +35,20 @@ it("updates an already open window for a failed ID while retaining another resul
   expect(store.get(executionIndexErrorAtom)).toBe(true);
   view.unmount();
 });
+
+it("refreshes a projection on its realtime signal with unchanged sidebar summaries", async () => {
+  let level = "high";
+  mocks.rpc.call.mockImplementation(async (method: string, input: { threadIds?: string[] } | null) => {
+    if (method === "getExecutionIndexStatus") return { state: "done", total: 2, done: 2, errors: 0 };
+    return { projections: input!.threadIds!.map((threadId) => ({ threadId, state: "ready", reasoningLevel: level, serviceTier: "fast" })) };
+  });
+  const store = createStore();
+  store.set(sidebarShowExecutionHighlightingAtom, true);
+  const view = render(<Provider store={store}><ExecutionProjectionSync /></Provider>);
+  await waitFor(() => expect(store.get(executionProjectionsAtom).t).toMatchObject({ reasoningLevel: "high" }));
+  level = "max";
+  act(() => mocks.handler?.({ threadId: "t" }));
+  await waitFor(() => expect(store.get(executionProjectionsAtom).t).toMatchObject({ reasoningLevel: "max" }));
+  expect(store.get(executionProjectionsAtom).other).toMatchObject({ reasoningLevel: "high" });
+  view.unmount();
+});

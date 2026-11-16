@@ -47,7 +47,7 @@ import {
 } from "../list/customizeRowActionsContext.js";
 
 installTestPluginRuntime();
-const { executionProjectionsAtom } = await import("../execution/ExecutionProjectionSync.js");
+const { executionProjectionsAtom, ExecutionProjectionSync } = await import("../execution/ExecutionProjectionSync.js");
 const { SidebarDraftPresenceSync } =
   await import("../list/sidebarDraftPresence.js");
 const { ThreadRowNavigationProvider } =
@@ -336,6 +336,28 @@ afterEach(() => {
 });
 
 describe("ThreadRow", () => {
+  it("updates the rendered title from realtime when the thread summary is unchanged", async () => {
+    const thread = createThread();
+    let level = "high";
+    const store = getDefaultStore();
+    act(() => { store.set(sidebarShowExecutionHighlightingAtom, true); store.set(executionProjectionsAtom, {}); });
+    const Slot = () => <><ExecutionProjectionSync /><ThreadRowHarness thread={thread} /></>;
+    const slot = renderSlot({ component: Slot }, {}, {
+      sidebarThreads: { threads: [thread], projects: [] },
+      rpc: {
+        getExecutionIndexStatus: () => ({ state: "done", total: 1, done: 1, errors: 0 }),
+        getExecutionProjections: (input: unknown) => ({ projections: (input as { threadIds: string[] }).threadIds.map((threadId) => ({ threadId, state: "ready", reasoningLevel: level, serviceTier: "fast" })) }),
+      },
+      threadActions: hostThreadActions(),
+    });
+    const title = () => slot.container.querySelector(".bb-thread-title");
+    await waitFor(() => expect(title()?.className).toContain("text-red-700"));
+    level = "low";
+    await slot.behavior.emitRealtime("execution-projection-changed", { threadId: thread.id });
+    await waitFor(() => expect(title()?.className).toContain("text-purple-700"));
+    expect(screen.getByRole("link", { name: /reasoning low; service tier fast/ }).getAttribute("href")).toBe(thread.href);
+    act(() => { store.set(executionProjectionsAtom, {}); store.set(sidebarShowExecutionHighlightingAtom, false); });
+  });
   it("explains a verified execution colour while retaining the complete title and link", () => {
     const thread = createThread();
     const store = getDefaultStore();

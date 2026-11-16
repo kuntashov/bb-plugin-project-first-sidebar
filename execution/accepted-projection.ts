@@ -26,7 +26,7 @@ function sdkFailure(error: unknown): AcceptedProjection {
 }
 
 /** Reads only the correlated execution pair; event bodies never escape this function. */
-export async function readAcceptedProjection(list: ListEvents, threadId: string): Promise<AcceptedProjection> {
+export async function readAcceptedProjection(list: ListEvents, threadId: string, appendOnlyPrevious?: Extract<AcceptedProjection, { state: "ready" }>): Promise<AcceptedProjection> {
   let acceptedRows;
   try {
     acceptedRows = await list({ threadId, types: ["turn/input/accepted"], order: "desc", limit: "1" });
@@ -38,6 +38,9 @@ export async function readAcceptedProjection(list: ListEvents, threadId: string)
   const parsedAccepted = acceptedSchema.safeParse(acceptedRows[0]);
   if (!parsedAccepted.success || acceptedRows.length !== 1) return { state: "error", reason: "malformed" };
   const accepted = parsedAccepted.data;
+  // This shortcut is only valid for an observed append after a verified read.
+  // Rewrites, reconnects and startup must read the request again even when IDs match.
+  if (appendOnlyPrevious && accepted.id === appendOnlyPrevious.acceptedId && accepted.seq === appendOnlyPrevious.acceptedSeq && accepted.data.clientRequestId === appendOnlyPrevious.requestId) return appendOnlyPrevious;
   let before = accepted.seq;
   let limit = "1";
   while (true) {

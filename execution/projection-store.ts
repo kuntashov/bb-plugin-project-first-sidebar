@@ -18,18 +18,47 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
       const ready = value.state === "ready" ? value : null;
       db.prepare(`INSERT OR REPLACE INTO execution_projection (generation, thread_id, state, reasoning_level, service_tier, accepted_id, accepted_seq, request_id, request_seq, error_reason) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(threadId, value.state, ready?.reasoningLevel ?? null, ready?.serviceTier ?? null, ready?.acceptedId ?? null, ready?.acceptedSeq ?? null, ready?.requestId ?? null, ready?.requestSeq ?? null, value.state === "error" ? value.reason : null);
     },
-    beginManifest(threads: { id: string; archivedAt: number | null }[]) {
+    beginManifest(threads: { id: string; archivedAt: number | null }[], changed = new Set<string>()) {
+      const removed: string[] = [];
       db.transaction(() => {
-        db.prepare("DELETE FROM execution_manifest WHERE generation = 1").run();
-        const insert = db.prepare("INSERT INTO execution_manifest (generation, thread_id, archived, state) VALUES (1, ?, ?, 'pending')");
-        for (const thread of threads) insert.run(thread.id, thread.archivedAt === null ? 0 : 1);
+        const existing = db.prepare("SELECT DISTINCT thread_id FROM execution_manifest").all() as { thread_id: string }[];
+        const visible = new Set(threads.map((thread) => thread.id));
+        for (const row of existing) if (!visible.has(row.thread_id) && !changed.has(row.thread_id)) {
+          db.prepare("DELETE FROM execution_projection WHERE thread_id = ?").run(row.thread_id);
+          db.prepare("DELETE FROM execution_manifest WHERE thread_id = ?").run(row.thread_id);
+          removed.push(row.thread_id);
+        }
+        const insert = db.prepare("INSERT INTO execution_manifest (generation, thread_id, archived, state) VALUES (1, ?, ?, 'pending') ON CONFLICT(generation, thread_id) DO UPDATE SET archived = excluded.archived, state = 'pending'");
+        for (const thread of threads) if (!changed.has(thread.id)) insert.run(thread.id, thread.archivedAt === null ? 0 : 1);
         db.prepare("INSERT OR REPLACE INTO execution_job (id, generation, state) VALUES (1, 1, 'running')").run();
       })();
+      for (const id of removed) failedIds.delete(id);
+    },
+    add(thread: { id: string; archivedAt: number | null }) {
+      db.prepare("INSERT INTO execution_manifest (generation, thread_id, archived, state) VALUES (1, ?, ?, 'pending') ON CONFLICT(generation, thread_id) DO UPDATE SET archived = excluded.archived").run(thread.id, thread.archivedAt === null ? 0 : 1);
+    },
+    remove(threadId: string) {
+      db.transaction(() => {
+        db.prepare("DELETE FROM execution_projection WHERE thread_id = ?").run(threadId);
+        db.prepare("DELETE FROM execution_manifest WHERE thread_id = ?").run(threadId);
+      })();
+      failedIds.delete(threadId);
+    },
+    contains(threadId: string) {
+      return !!db.prepare("SELECT 1 FROM execution_manifest WHERE generation = 1 AND thread_id = ?").get(threadId);
+    },
+    ids() {
+      return (db.prepare("SELECT DISTINCT thread_id FROM execution_manifest").all() as { thread_id: string }[]).map((row) => row.thread_id);
+    },
+    verified(threadId: string): Extract<AcceptedProjection, { state: "ready" }> | undefined {
+      if (failedIds.has(threadId)) return undefined;
+      const row = db.prepare("SELECT reasoning_level, service_tier, accepted_id, accepted_seq, request_id, request_seq FROM execution_projection WHERE generation = 1 AND thread_id = ? AND state = 'ready'").get(threadId) as { reasoning_level: string | null; service_tier: string | null; accepted_id: string; accepted_seq: number; request_id: string; request_seq: number } | undefined;
+      return row && { state: "ready", reasoningLevel: row.reasoning_level, serviceTier: row.service_tier, acceptedId: row.accepted_id, acceptedSeq: row.accepted_seq, requestId: row.request_id, requestSeq: row.request_seq };
     },
     commit(threadId: string, value: AcceptedProjection) {
       db.transaction(() => {
         store.put(threadId, value);
-        db.prepare("UPDATE execution_manifest SET state = ? WHERE generation = 1 AND thread_id = ? AND state = 'pending'").run(value.state === 'error' ? 'error' : 'done', threadId);
+        db.prepare("UPDATE execution_manifest SET state = ? WHERE generation = 1 AND thread_id = ?").run(value.state === 'error' ? 'error' : 'done', threadId);
       })();
       failedIds.delete(threadId);
     },

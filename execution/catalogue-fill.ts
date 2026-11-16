@@ -12,67 +12,165 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-/** One server service owns the initial queue. Later reconciliation uses the same storage. */
+function transient(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const e = error as { code?: unknown; status?: unknown; name?: unknown; cause?: { code?: unknown } };
+  return (typeof e.code === "string" && (e.code.startsWith("SQLITE_BUSY") || ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN"].includes(e.code))) ||
+    (typeof e.cause?.code === "string" && ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN"].includes(e.cause.code)) ||
+    e.name === "BbRequestTimeoutError" || (typeof e.status === "number" && [408, 429, 502, 503, 504].includes(e.status));
+}
+
+/** All reads and writes for an ID go through the same revision-fenced worker. */
 export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof createExecutionProjectionStore>) {
+  let dispatch: ((id: string, membership: boolean, force?: boolean) => void) | undefined;
   let load = 0;
+  const early = new Set<string>();
+  bb.events.on("experimental_thread.events", ({ thread }) => {
+    if (dispatch) dispatch(thread.id, false, false); else early.add(thread.id);
+  });
   bb.background.service("execution-catalogue", {
     async start(signal) {
       const current = ++load;
       const stale = () => signal.aborted || current !== load;
-      try {
-        const threads = await bb.sdk.threads.list({ includeHidden: false });
+      const revisions = new Map<string, number>();
+      const membership = new Set<string>();
+      const fullRead = new Set<string>();
+      const pending = new Set<string>();
+      const running = new Set<string>();
+      let snapshotChanges: Set<string> | undefined;
+      let active = 0;
+      let wake: (() => void) | undefined;
+      let storageFailed = false;
+      const publish = (id?: string) => { if (!stale()) bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, id ? { threadId: id } : {}); };
+      const changed = (id: string, check: boolean, force = true) => {
         if (stale()) return;
-        store.beginManifest(threads);
-        let storageFailed = false;
-        // Finish all active units before starting the archive.
-        for (const archived of [false, true]) {
-          const ids = threads.filter((thread) => (thread.archivedAt !== null) === archived).map((thread) => thread.id);
-          let next = 0;
-          const workers = await Promise.allSettled(Array.from({ length: Math.min(4, ids.length) }, async () => {
-            while (!stale() && next < ids.length) {
-              const id = ids[next++]!;
-              let result = await readAcceptedProjection(bb.sdk.threads.events.list, id);
-              for (const ms of [1000, 5000, 15000]) {
-                if (result.state !== "error" || result.reason !== "transient" || stale()) break;
-                await delay(ms, signal);
-                if (stale()) return;
-                result = await readAcceptedProjection(bb.sdk.threads.events.list, id);
-              }
-              if (stale()) return;
-              try {
-                for (let attempt = 0; ; attempt++) {
-                  try { store.commit(id, result); break; } catch (error) {
-                    const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
-                    if (typeof code !== "string" || !code.startsWith("SQLITE_BUSY") || attempt === 3) throw error;
-                    await delay([1000, 5000, 15000][attempt]!, signal);
-                    if (stale()) return;
-                  }
-                }
-              } catch (error) {
-                const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
-                try { store.commit(id, { state: "error", reason: typeof code === "string" && code.startsWith("SQLITE_BUSY") ? "transient" : "unknown" }); }
-                catch {
-                  storageFailed = true;
-                  store.markFailed(id);
-                  try { store.fail(); } catch { /* status RPC failure is surfaced by the client */ }
-                }
-              }
-              if (!stale()) bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, { threadId: id });
-            }
-          }));
-          const failed = workers.find((worker) => worker.status === "rejected");
-          if (failed?.status === "rejected") throw failed.reason;
-          if (stale()) return;
+        revisions.set(id, (revisions.get(id) ?? 0) + 1);
+        if (check) { membership.add(id); snapshotChanges?.add(id); }
+        if (force) fullRead.add(id);
+        pending.add(id);
+        pump();
+      };
+      const retry = async <T>(operation: () => Promise<T>): Promise<T> => {
+        for (let attempt = 0; ; attempt++) {
+          try { return await operation(); } catch (error) {
+            if (attempt === 3 || !transient(error) || stale()) throw error;
+            await delay([1000, 5000, 15000][attempt]!, signal);
+            if (stale()) throw error;
+          }
         }
-        if (storageFailed) store.fail(); else store.finish();
-        bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, {});
-      } catch (error) {
-        if (!stale()) {
-          try { store.fail(); } catch { /* Storage itself is unavailable. */ }
-          bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, {});
-          bb.log.error(`Execution catalogue fill failed: ${error instanceof Error ? error.name : "unknown error"}`);
+      };
+      async function work(id: string) {
+        const revision = revisions.get(id) ?? 0;
+        const force = fullRead.delete(id);
+        const valid = () => !stale() && revision === (revisions.get(id) ?? 0);
+        try {
+          if (membership.has(id)) {
+            const rows = await retry(() => bb.sdk.threads.list({ threadIds: [id], includeHidden: false }));
+            if (!valid()) return;
+            const thread = rows.find((row) => row.id === id);
+            if (!thread) {
+              await retry(async () => { if (valid()) store.remove(id); });
+              if (valid()) { membership.delete(id); publish(id); }
+              return;
+            }
+            await retry(async () => { if (valid()) store.add(thread); });
+            if (!valid()) return;
+            membership.delete(id);
+          }
+          if (!store.contains(id)) return;
+          const previous = force ? undefined : store.verified(id);
+          let result = await readAcceptedProjection(bb.sdk.threads.events.list, id, previous);
+          for (const ms of [1000, 5000, 15000]) {
+            if (result.state !== "error" || result.reason !== "transient" || !valid()) break;
+            await delay(ms, signal);
+            if (!valid()) return;
+            result = await readAcceptedProjection(bb.sdk.threads.events.list, id, previous);
+          }
+          if (!valid()) return;
+          const before = store.read([id])[0];
+          await retry(async () => { if (valid()) store.commit(id, result); });
+          if (!valid()) return;
+          if (JSON.stringify(before) !== JSON.stringify(store.read([id])[0])) publish(id);
+        } catch (error) {
+          if (!valid()) return;
+          try { store.commit(id, { state: "error", reason: transient(error) ? "transient" : "unknown" }); }
+          catch { storageFailed = true; store.markFailed(id); try { store.fail(); } catch { /* status still reports failure */ } }
+          publish(id);
+        } finally {
+          if (force && !valid() && !stale()) fullRead.add(id);
         }
       }
+      function pump() {
+        while (!stale() && active < 4) {
+          const id = [...pending].find((candidate) => !running.has(candidate));
+          if (!id) break;
+          pending.delete(id); running.add(id); active++;
+          void work(id).finally(() => {
+            running.delete(id); active--;
+            if (!stale()) pump();
+            wake?.();
+          });
+        }
+      }
+      async function drain() {
+        while (!stale() && (pending.size || active)) await new Promise<void>((resolve) => { wake = resolve; });
+        wake = undefined;
+      }
+      dispatch = changed;
+      const unsubscribeThread = bb.sdk.subscribe({ event: "thread:changed", callback: (event) => {
+        if (event.id && event.changes.some((change) => ["thread-created", "thread-deleted", "title-changed", "archived-changed"].includes(change))) changed(event.id, true);
+        if (event.id && event.changes.some((change) => ["history-rewritten", "history-compacted"].includes(change))) changed(event.id, false);
+      } });
+      let scanRequested = false;
+      let scanRunning = false;
+      const scan = async () => {
+        scanRequested = true;
+        if (scanRunning) return;
+        scanRunning = true;
+        try {
+          while (scanRequested && !stale()) {
+            scanRequested = false;
+            const touched = new Set<string>(); snapshotChanges = touched;
+            const threads = await retry(() => bb.sdk.threads.list({ includeHidden: false }));
+            if (stale()) return;
+            const visible = new Set(threads.map((thread) => thread.id));
+            let removed: string[] = [];
+            await retry(async () => {
+              if (stale()) return;
+              removed = store.ids().filter((id) => !visible.has(id) && !touched.has(id));
+              for (const id of removed) revisions.set(id, (revisions.get(id) ?? 0) + 1);
+              store.beginManifest(threads, touched);
+            });
+            if (stale()) return;
+            snapshotChanges = undefined;
+            for (const id of removed) publish(id);
+            // Recheck every ID observed during the snapshot, even if it was already processed.
+            for (const id of touched) changed(id, true);
+            for (const archived of [false, true]) {
+              for (const thread of threads) if (!touched.has(thread.id) && (thread.archivedAt !== null) === archived) changed(thread.id, false);
+              await drain();
+              if (stale()) return;
+            }
+            await retry(async () => { if (!stale()) { if (storageFailed) store.fail(); else store.finish(); } });
+            publish();
+          }
+        } catch (error) {
+          snapshotChanges = undefined;
+          if (!stale()) {
+            try { store.fail(); } catch { /* storage is unavailable */ }
+            publish();
+            bb.log.error(`Execution catalogue fill failed: ${error instanceof Error ? error.name : "unknown error"}`);
+          }
+        } finally { scanRunning = false; }
+      };
+      const unsubscribeConnection = bb.sdk.subscribe({ event: "realtime:connection", callback: (event) => {
+        if (event.state === "connected") void scan();
+      } });
+      for (const id of early) changed(id, true);
+      early.clear();
+      const stop = () => { if (current === load) { ++load; dispatch = undefined; } unsubscribeThread(); unsubscribeConnection(); wake?.(); };
+      signal.addEventListener("abort", stop, { once: true });
+      await scan();
       if (!signal.aborted) await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
     },
   });
