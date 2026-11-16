@@ -8,6 +8,8 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
   // Only this store changes jobs; keep the fence independent of fallible SQLite reads.
   let fence = 0;
   let building = false;
+  let globallyUnverified = false;
+  const reverified = new Set<string>();
   const failedIds = new Set<string>();
   const workingFailures = new Set<string>();
   bb.storage.migrate(db, [
@@ -86,6 +88,7 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
       store.put(threadId, result);
       return result;
     },
+    invalidateAll() { globallyUnverified = true; reverified.clear(); },
     markUnverified() { db.prepare("UPDATE execution_projection SET state = 'unverified' WHERE generation = ? AND state IN ('ready', 'absent')").run(active()); },
     put(threadId: string, value: AcceptedProjection, generation = active()) {
       const ready = value.state === "ready" ? value : null;
@@ -107,7 +110,7 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
         if (!job()) db.prepare("INSERT INTO execution_job (id, generation, state, kind) VALUES (1, ?, 'running', 'initial')").run(active());
         else if (job()?.state !== 'running') db.prepare("UPDATE execution_job SET state = 'running', failure_scope = NULL WHERE id = 1").run();
       })();
-      for (const id of removed) { failedIds.delete(id); workingFailures.delete(id); }
+      for (const id of removed) { failedIds.delete(id); workingFailures.delete(id); reverified.delete(id); }
       storageFailure = false;
     },
     add(thread: { id: string; archivedAt: number | null }) {
@@ -120,6 +123,7 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
       })();
       failedIds.delete(threadId);
       workingFailures.delete(threadId);
+      reverified.delete(threadId);
     },
     contains(threadId: string) {
       return !!db.prepare("SELECT 1 FROM execution_manifest WHERE generation = ? AND thread_id = ?").get(target(), threadId);
@@ -130,20 +134,22 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
       return [...ids];
     },
     verified(threadId: string): Extract<AcceptedProjection, { state: "ready" }> | undefined {
-      if (failedIds.has(threadId)) return undefined;
+      if (failedIds.has(threadId) || (globallyUnverified && !reverified.has(threadId))) return undefined;
       const row = db.prepare("SELECT reasoning_level, service_tier, accepted_id, accepted_seq, request_id, request_seq FROM execution_projection WHERE generation = ? AND thread_id = ? AND state = 'ready'").get(active(), threadId) as { reasoning_level: string | null; service_tier: string | null; accepted_id: string; accepted_seq: number; request_id: string; request_seq: number } | undefined;
       return row && { state: "ready", reasoningLevel: row.reasoning_level, serviceTier: row.service_tier, acceptedId: row.accepted_id, acceptedSeq: row.accepted_seq, requestId: row.request_id, requestSeq: row.request_seq };
     },
-    commit(threadId: string, value: AcceptedProjection, live = true) {
+    commit(threadId: string, value: AcceptedProjection, live = true, verifyGlobal = true) {
+      let workingUpdated = false;
       db.transaction(() => {
         const generation = target();
         const rebuild = job()?.kind === "rebuild" && generation !== active();
-        if (!rebuild || value.state !== "error" || live) store.put(threadId, value, active());
+        if (!rebuild || value.state !== "error" || live) { store.put(threadId, value, active()); workingUpdated = true; }
         if (rebuild) store.put(threadId, value, generation);
         db.prepare("UPDATE execution_manifest SET state = ? WHERE generation = ? AND thread_id = ?").run(value.state === 'error' ? 'error' : 'done', generation, threadId);
       })();
       failedIds.delete(threadId);
       workingFailures.delete(threadId);
+      if (verifyGlobal && workingUpdated) reverified.add(threadId);
     },
     markFailed(threadId: string, live = true) { failedIds.add(threadId); if (live || !building) workingFailures.add(threadId); },
     finish() {
@@ -180,6 +186,7 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
         if (workingFailures.has(threadId)) return { threadId, state: "error" };
         const row = query.get(active(), threadId) as { state: string; reasoning_level: string | null; service_tier: string | null } | undefined;
         if (!row) return { threadId, state: "loading" };
+        if (globallyUnverified && !reverified.has(threadId) && (row.state === "ready" || row.state === "absent")) return { threadId, state: "unverified" };
         const projection = row.state === "ready" ? { threadId, state: row.state, reasoningLevel: row.reasoning_level, serviceTier: row.service_tier } : { threadId, state: row.state };
         return executionProjectionSchema.parse(projection);
       });

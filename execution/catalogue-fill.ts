@@ -37,6 +37,10 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
       let scanRunning = false;
       isScanActive = () => !stale() && scanRunning;
       const revisions = new Map<string, number>();
+      let globalRevision = 0;
+      let catalogRevision = 0;
+      let scanRequested = false;
+      let scanLiveRequested = false;
       const membership = new Set<string>();
       const fullRead = new Set<string>();
       const live = new Set<string>();
@@ -68,13 +72,14 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
       };
       async function work(id: string) {
         const revision = revisions.get(id) ?? 0;
+        const globalAtStart = globalRevision;
         const token = store.token();
         const force = fullRead.delete(id);
         const liveChange = live.delete(id);
-        const valid = () => !stale() && token === store.token() && revision === (revisions.get(id) ?? 0);
+        const valid = () => !stale() && token === store.token() && revision === (revisions.get(id) ?? 0) && globalAtStart === globalRevision;
         const recordFailure = () => {
           if (!valid()) return;
-          try { store.commit(id, { state: "error", reason: "transient" }, liveChange); }
+          try { store.commit(id, { state: "error", reason: "transient" }, liveChange, catalogRevision === globalRevision); }
           catch { store.markFailed(id, liveChange); }
           publish(id);
         };
@@ -114,7 +119,7 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
           if (!valid()) return;
           const outcome = await retry(async () => {
             if (!valid()) return undefined;
-            store.commit(id, result, liveChange);
+            store.commit(id, result, liveChange, catalogRevision === globalRevision);
             return { after: store.read([id])[0], status: store.status() };
           }, recordFailure);
           if (!valid() || !outcome) return;
@@ -122,10 +127,11 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
           else if (outcome.status.state === 'running' || JSON.stringify(statusBefore) !== JSON.stringify(outcome.status)) bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, { progress: true });
         } catch (error) {
           if (!valid()) return;
-          try { store.commit(id, { state: "error", reason: transient(error) ? "transient" : "unknown" }, liveChange); }
+          try { store.commit(id, { state: "error", reason: transient(error) ? "transient" : "unknown" }, liveChange, catalogRevision === globalRevision); }
           catch { store.markFailed(id, liveChange); }
           publish(id);
         } finally {
+          if (globalAtStart !== globalRevision && !stale()) { fullRead.add(id); live.add(id); }
           if (force && !valid() && !stale()) fullRead.add(id);
           if (liveChange && !valid() && !stale()) live.add(id);
           if (!valid() && !stale()) pending.add(id);
@@ -157,10 +163,23 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
       }
       dispatch = changed;
       const unsubscribeThread = bb.sdk.subscribe({ event: "thread:changed", callback: (event) => {
+        if (!event.id) {
+          const membershipOrRewrite = event.changes.some((change) => ["thread-created", "thread-deleted", "title-changed", "archived-changed", "history-rewritten", "history-compacted"].includes(change));
+          const types = event.metadata?.eventTypes;
+          const relevantAppend = event.changes.includes("events-appended") && (!types?.length || types.some((type) => type === "turn/input/accepted" || type === "client/turn/requested"));
+          if (membershipOrRewrite || relevantAppend) {
+            globalRevision++;
+            store.invalidateAll();
+            publish();
+            scanLiveRequested = true;
+            scanRequested = true;
+            requestScan?.();
+          }
+          return;
+        }
         if (event.id && event.changes.some((change) => ["thread-created", "thread-deleted", "title-changed", "archived-changed"].includes(change))) changed(event.id, true);
         if (event.id && event.changes.some((change) => ["history-rewritten", "history-compacted"].includes(change))) changed(event.id, false);
       } });
-      let scanRequested = false;
       const scan = async () => {
         scanRequested = true;
         if (scanRunning) return;
@@ -173,27 +192,34 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
         try {
           while (scanRequested && !stale()) {
             scanRequested = false;
+            const liveScan = scanLiveRequested;
+            scanLiveRequested = false;
+            const scanRevision = globalRevision;
             publishProgress();
             await retry(async () => { if (!stale()) store.beginRecovery(); }, recordScanFailure);
             if (stale()) return;
             const touched = new Set<string>(); snapshotChanges = touched;
             const threads = await retry(() => bb.sdk.threads.list({ includeHidden: false }), recordScanFailure);
             if (stale()) return;
+            if (scanRevision !== globalRevision) { snapshotChanges = undefined; continue; }
             const visible = new Set(threads.map((thread) => thread.id));
             let removed: string[] = [];
-            await retry(async () => {
-              if (stale()) return;
+            const applied = await retry(async () => {
+              if (stale() || scanRevision !== globalRevision) return false;
               removed = store.ids().filter((id) => !visible.has(id) && !touched.has(id));
               for (const id of removed) revisions.set(id, (revisions.get(id) ?? 0) + 1);
               store.beginManifest(threads, touched);
+              return true;
             }, recordScanFailure);
             if (stale()) return;
+            if (!applied || scanRevision !== globalRevision) { snapshotChanges = undefined; continue; }
+            catalogRevision = scanRevision;
             snapshotChanges = undefined;
             for (const id of removed) publish(id);
             // Recheck every ID observed during the snapshot, even if it was already processed.
             for (const id of touched) changed(id, true);
             for (const archived of [false, true]) {
-              for (const thread of threads) if (!touched.has(thread.id) && (thread.archivedAt !== null) === archived) changed(thread.id, false, true, false);
+              for (const thread of threads) if (!touched.has(thread.id) && (thread.archivedAt !== null) === archived) changed(thread.id, false, true, liveScan);
               await drain();
               if (stale()) return;
             }
