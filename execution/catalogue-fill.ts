@@ -53,6 +53,7 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
                 try { store.commit(id, { state: "error", reason: typeof code === "string" && code.startsWith("SQLITE_BUSY") ? "transient" : "unknown" }); }
                 catch {
                   storageFailed = true;
+                  store.markFailed(id);
                   try { store.fail(); } catch { /* status RPC failure is surfaced by the client */ }
                 }
               }
@@ -67,7 +68,8 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
         bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, {});
       } catch (error) {
         if (!stale()) {
-          try { store.fail(); bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, {}); } catch { /* Storage itself is unavailable. */ }
+          try { store.fail(); } catch { /* Storage itself is unavailable. */ }
+          bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, {});
           bb.log.error(`Execution catalogue fill failed: ${error instanceof Error ? error.name : "unknown error"}`);
         }
       }

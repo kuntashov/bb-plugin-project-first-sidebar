@@ -44,14 +44,15 @@ it("fills through the factory service into SQLite and RPC, with bounded active w
 });
 
 it("rolls back result and checkpoint together when the checkpoint write fails", async () => {
-  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: { threads: { list: async () => [makeThreadResponse({ id: "t" })], events: { list: async () => [] } } } });
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: { threads: { list: async () => [makeThreadResponse({ id: "t" }), makeThreadResponse({ id: "archive", archivedAt: 1 })], events: { list: async () => [] } } } });
   await plugin(bb);
-  bb.storage.database().exec("CREATE TRIGGER reject_checkpoint BEFORE UPDATE ON execution_manifest BEGIN SELECT RAISE(ABORT, 'failure'); END");
+  bb.storage.database().exec("CREATE TRIGGER reject_checkpoint BEFORE UPDATE ON execution_manifest WHEN NEW.thread_id = 't' BEGIN SELECT RAISE(ABORT, 'failure'); END");
   bb.storage.database().exec("CREATE TRIGGER reject_job_error BEFORE UPDATE ON execution_job BEGIN SELECT RAISE(ABORT, 'failure'); END");
   const service = harness.behavior.runService("execution-catalogue");
   await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "error" }));
-  expect(await harness.behavior.callRpc("getExecutionProjections", { threadIds: ["t"] })).toEqual({ projections: [{ threadId: "t", state: "loading" }] });
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionProjections", { threadIds: ["t", "archive"] })).toEqual({ projections: [{ threadId: "t", state: "error" }, { threadId: "archive", state: "absent" }] }));
   expect(bb.storage.database().prepare("SELECT state FROM execution_manifest WHERE thread_id = ?").get("t")).toEqual({ state: "pending" });
+  expect(harness.inspection.realtimeSignals.some((signal) => JSON.stringify(signal).includes('"threadId":"t"'))).toBe(true);
   service.controller.abort(); await service.done; await harness.lifecycle.dispose();
 });
 
@@ -102,4 +103,14 @@ it("retries SQLite busy at 1, 5 and 15 seconds, then records the affected ID and
     expect(store.status()).toEqual({ state: "error", total: 2, done: 1, errors: 1 });
     service.controller.abort(); await service.done; await harness.lifecycle.dispose();
   } finally { vi.useRealTimers(); }
+});
+
+it("publishes a job failure even when persisting that failure also fails", async () => {
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: { threads: { list: async () => { throw new Error("unavailable"); } } } });
+  await plugin(bb);
+  bb.storage.database().exec("CREATE TRIGGER reject_job_insert BEFORE INSERT ON execution_job BEGIN SELECT RAISE(ABORT, 'failure'); END");
+  const service = harness.behavior.runService("execution-catalogue");
+  await vi.waitFor(() => expect(harness.inspection.realtimeSignals).toHaveLength(1));
+  expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "error" });
+  service.controller.abort(); await service.done; await harness.lifecycle.dispose();
 });

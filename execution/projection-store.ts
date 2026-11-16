@@ -5,6 +5,7 @@ import { executionProjectionSchema, type ExecutionProjection } from "../shared/e
 export function createExecutionProjectionStore(bb: BbPluginApi) {
   const db = bb.storage.database();
   let storageFailure = false;
+  const failedIds = new Set<string>();
   bb.storage.migrate(db, [`CREATE TABLE IF NOT EXISTS execution_projection (generation INTEGER NOT NULL, thread_id TEXT NOT NULL, state TEXT NOT NULL, reasoning_level TEXT, service_tier TEXT, accepted_id TEXT, accepted_seq INTEGER, request_id TEXT, request_seq INTEGER, PRIMARY KEY (generation, thread_id))`, `ALTER TABLE execution_projection ADD COLUMN error_reason TEXT`, `CREATE TABLE execution_job (id INTEGER PRIMARY KEY CHECK (id = 1), generation INTEGER NOT NULL, state TEXT NOT NULL)`, `CREATE TABLE execution_manifest (generation INTEGER NOT NULL, thread_id TEXT NOT NULL, archived INTEGER NOT NULL, state TEXT NOT NULL, PRIMARY KEY (generation, thread_id))`]);
   const store = {
     async reconcile(threadId: string) {
@@ -30,7 +31,9 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
         store.put(threadId, value);
         db.prepare("UPDATE execution_manifest SET state = ? WHERE generation = 1 AND thread_id = ? AND state = 'pending'").run(value.state === 'error' ? 'error' : 'done', threadId);
       })();
+      failedIds.delete(threadId);
     },
+    markFailed(threadId: string) { failedIds.add(threadId); },
     finish() {
       db.prepare("UPDATE execution_job SET state = CASE WHEN EXISTS (SELECT 1 FROM execution_manifest WHERE generation = 1 AND state != 'done') THEN 'error' ELSE 'done' END WHERE id = 1").run();
     },
@@ -46,6 +49,7 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
     read(threadIds: string[]): ExecutionProjection[] {
       const query = db.prepare("SELECT state, reasoning_level, service_tier FROM execution_projection WHERE generation = 1 AND thread_id = ?");
       return threadIds.map((threadId) => {
+        if (failedIds.has(threadId)) return { threadId, state: "error" };
         const row = query.get(threadId) as { state: string; reasoning_level: string | null; service_tier: string | null } | undefined;
         if (!row) return { threadId, state: "loading" };
         const projection = row.state === "ready" ? { threadId, state: row.state, reasoningLevel: row.reasoning_level, serviceTier: row.service_tier } : { threadId, state: row.state };
