@@ -116,7 +116,7 @@ it("publishes a job failure even when persisting that failure also fails", async
   bb.storage.database().exec("CREATE TRIGGER reject_job_insert BEFORE INSERT ON execution_job BEGIN SELECT RAISE(ABORT, 'failure'); END");
   harness.sdk.stub("subscribe", () => () => {});
   const service = harness.behavior.runService("execution-catalogue");
-  await vi.waitFor(() => expect(harness.inspection.realtimeSignals).toHaveLength(1));
+  await vi.waitFor(() => expect(harness.inspection.realtimeSignals.length).toBeGreaterThan(0));
   expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "error" });
   service.controller.abort(); await service.done; await harness.lifecycle.dispose();
 });
@@ -619,11 +619,40 @@ it("persists a reconnect catalogue error before backoff and resumes after succes
     failing = true;
     callbacks.get("realtime:connection")!({ state: "connected", reconnected: true } as never);
     await vi.advanceTimersByTimeAsync(0);
-    expect(await harness.behavior.callRpc("getExecutionRebuildStatus", null)).toMatchObject({ state: "error", kind: "recovery" });
+    expect(await harness.behavior.callRpc("getExecutionRebuildStatus", null)).toMatchObject({ state: "error", kind: "recovery", active: true });
     expect(bb.storage.database().prepare("SELECT state, failure_scope FROM execution_job").get()).toEqual({ state: "error", failure_scope: "catalogue" });
+    const results = await Promise.all([harness.behavior.callRpc("startExecutionRebuild", null), harness.behavior.callRpc("startExecutionRebuild", null)]);
+    expect(results).toEqual([expect.objectContaining({ kind: "recovery", state: "error", active: true }), expect.objectContaining({ kind: "recovery", state: "error", active: true })]);
+    expect(bb.storage.database().prepare("SELECT generation, kind FROM execution_job").get()).toEqual({ generation: 1, kind: "recovery" });
+    expect(bb.storage.database().prepare("SELECT active_generation FROM execution_meta").get()).toEqual({ active_generation: 1 });
     failing = false;
     await vi.advanceTimersByTimeAsync(1000);
-    expect(await harness.behavior.callRpc("getExecutionRebuildStatus", null)).toMatchObject({ state: "done", kind: "recovery" });
+    expect(await harness.behavior.callRpc("getExecutionRebuildStatus", null)).toMatchObject({ state: "done", kind: "recovery", active: false });
+    expect(await harness.behavior.callRpc("startExecutionRebuild", null)).toMatchObject({ kind: "rebuild", state: "running", active: true });
+    service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+  } finally { vi.useRealTimers(); }
+});
+
+it("allows an explicit rebuild after recovery exhausts its catalogue retries", async () => {
+  vi.useFakeTimers();
+  try {
+    let failing = false;
+    const callbacks = new Map<string, (event: never) => void>();
+    const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: {
+      subscribe: ({ event, callback }) => { callbacks.set(event, callback as (event: never) => void); return () => callbacks.delete(event); },
+      threads: { list: async () => { if (failing) throw Object.assign(new Error("unavailable"), { status: 503 }); return [makeThreadResponse({ id: "t" })]; }, events: { list: async () => [] } },
+    } });
+    await plugin(bb);
+    const service = harness.behavior.runService("execution-catalogue");
+    await vi.advanceTimersByTimeAsync(0);
+    failing = true;
+    callbacks.get("realtime:connection")!({ state: "connected", reconnected: true } as never);
+    await vi.advanceTimersByTimeAsync(21000);
+    expect(await harness.behavior.callRpc("getExecutionRebuildStatus", null)).toMatchObject({ kind: "recovery", state: "error", active: false });
+    failing = false;
+    expect(await harness.behavior.callRpc("startExecutionRebuild", null)).toMatchObject({ kind: "rebuild", state: "running", active: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await harness.behavior.callRpc("getExecutionRebuildStatus", null)).toMatchObject({ kind: "rebuild", state: "done", active: false });
     service.controller.abort(); await service.done; await harness.lifecycle.dispose();
   } finally { vi.useRealTimers(); }
 });

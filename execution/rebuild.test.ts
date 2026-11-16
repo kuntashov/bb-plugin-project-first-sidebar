@@ -244,6 +244,7 @@ it("waits for a live change during rebuild and cuts over only after its newest r
   const service = harness.behavior.runService("execution-catalogue");
   await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "done" }));
   block = true;
+  const signalsBeforeRebuild = harness.inspection.realtimeSignals.length;
   await harness.behavior.callRpc("startExecutionRebuild", null);
   await vi.waitFor(() => expect(release).toBeDefined());
   level = "low";
@@ -253,6 +254,7 @@ it("waits for a live change during rebuild and cuts over only after its newest r
   await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionRebuildStatus", null)).toMatchObject({ state: "done", kind: "rebuild" }));
   expect(await harness.behavior.callRpc("getExecutionProjections", { threadIds: ["t"] })).toMatchObject({ projections: [{ reasoningLevel: "low" }] });
   expect(bb.storage.database().prepare("SELECT DISTINCT generation FROM execution_projection").all()).toEqual([{ generation: 2 }]);
+  expect(harness.inspection.realtimeSignals.slice(signalsBeforeRebuild).filter((signal) => JSON.stringify(signal.payload) === "{}")).toHaveLength(1);
   service.controller.abort(); await service.done; await harness.lifecycle.dispose();
 });
 

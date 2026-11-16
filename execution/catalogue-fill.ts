@@ -25,6 +25,7 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
   let dispatch: ((id: string, membership: boolean, force?: boolean) => void) | undefined;
   let requestScan: (() => void) | undefined;
   let load = 0;
+  let isScanActive = () => false;
   const early = new Set<string>();
   bb.events.on("experimental_thread.events", ({ thread }) => {
     if (dispatch) dispatch(thread.id, false, false); else early.add(thread.id);
@@ -33,6 +34,8 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
     async start(signal) {
       const current = ++load;
       const stale = () => signal.aborted || current !== load;
+      let scanRunning = false;
+      isScanActive = () => !stale() && scanRunning;
       const revisions = new Map<string, number>();
       const membership = new Set<string>();
       const fullRead = new Set<string>();
@@ -157,11 +160,11 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
         if (event.id && event.changes.some((change) => ["history-rewritten", "history-compacted"].includes(change))) changed(event.id, false);
       } });
       let scanRequested = false;
-      let scanRunning = false;
       const scan = async () => {
         scanRequested = true;
         if (scanRunning) return;
         scanRunning = true;
+        let cleanupNeeded = false;
         const recordScanFailure = () => {
           if (stale()) return;
           try { store.fail(); } catch { /* storage is unavailable */ }
@@ -198,21 +201,23 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
               return false;
             }, recordScanFailure);
             if (scanRequested) continue;
-            publish();
-            if (completed) {
-              try { store.cleanup(); } catch { bb.log.error("Execution index cleanup failed; it will be retried at startup"); }
-            }
+            cleanupNeeded = completed;
           }
         } catch (error) {
           snapshotChanges = undefined;
           if (!stale()) {
             try { store.fail(); } catch { /* storage is unavailable */ }
-            publish();
             bb.log.error(`Execution catalogue fill failed: ${error instanceof Error ? error.name : "unknown error"}`);
           }
         } finally {
           scanRunning = false;
           if (scanRequested && !stale()) void scan();
+          else {
+            publish();
+            if (cleanupNeeded && !stale()) {
+              try { store.cleanup(); } catch { bb.log.error("Execution index cleanup failed; it will be retried at startup"); }
+            }
+          }
         }
       };
       requestScan = () => { void scan(); };
@@ -221,7 +226,7 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
       } });
       for (const id of early) changed(id, true);
       early.clear();
-      const stop = () => { if (current === load) { ++load; dispatch = undefined; requestScan = undefined; } unsubscribeThread(); unsubscribeConnection(); wake?.(); };
+      const stop = () => { if (current === load) { ++load; dispatch = undefined; requestScan = undefined; isScanActive = () => false; } unsubscribeThread(); unsubscribeConnection(); wake?.(); };
       signal.addEventListener("abort", stop, { once: true });
       if (signal.aborted) { stop(); return; }
       void scan();
@@ -229,9 +234,10 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
     },
   });
   return {
+    status() { return { ...store.status(), kind: store.kind(), tooLarge: store.tooLarge(), active: isScanActive() }; },
     startRebuild() {
-      if (store.startRebuild()) { requestScan?.(); bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, { progress: true }); }
-      return { ...store.status(), kind: store.kind(), tooLarge: store.tooLarge() };
+      if (!isScanActive() && store.startRebuild()) { requestScan?.(); bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, { progress: true }); }
+      return this.status();
     },
   };
 }

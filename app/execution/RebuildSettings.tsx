@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { EXECUTION_CHANGED_CHANNEL } from "../../shared/execution-projection.js";
 import type { projectFirstSidebarRpcContract } from "../../server.js";
 
-type Status = { kind: "initial" | "rebuild" | "recovery"; state: "loading" | "running" | "done" | "error"; total: number; done: number; errors: number; tooLarge: number };
+type Status = { kind: "initial" | "rebuild" | "recovery"; state: "loading" | "running" | "done" | "error"; total: number; done: number; errors: number; tooLarge: number; active: boolean };
 
 export function RebuildSettings() {
   const rpc = useRpc<typeof projectFirstSidebarRpcContract>();
@@ -30,10 +30,10 @@ export function RebuildSettings() {
     } catch { if (current === version.current) setError(true); }
     finally { setBusy(false); }
   }
-  const recovering = status?.kind === "recovery" && status.state === "running";
+  const recovering = status?.kind === "recovery" && (status.state === "running" || status.active);
   return <div className="flex flex-col gap-3">
     <p role={error || status?.state === "error" ? "alert" : "status"}>
-      {error ? "Execution index status is unavailable." : !status ? "Loading execution index status…" : `${status.kind}: ${status.state} — ${status.done} / ${status.total} processed, ${status.errors} errors.`}
+      {error ? "Execution index status is unavailable." : !status ? "Loading execution index status…" : `${status.kind}: ${status.state} — ${status.done} / ${status.total} processed, thread errors: ${status.errors}.`}
       {recovering && " Wait for recovery to finish before rebuilding."}
       {!!status?.tooLarge && ` ${status.tooLarge} histories exceed the SDK response size limit (413).`}
     </p>
