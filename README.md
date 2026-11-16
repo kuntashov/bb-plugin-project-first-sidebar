@@ -56,13 +56,13 @@ High+ means exactly `high`, `xhigh`, `ultracode`, `max` or `ultra`. Fast means e
 
 The colour describes the request associated with the **last accepted** input in the thread's own saved history. Drafts, queued or rejected inputs and project defaults do not change it; it describes the requested configuration, not any later provider fallback. Idle and archived threads retain their last accepted configuration. A fork includes its copied history and can acquire a colour after that history is read, without a new run; later changes to the source do not propagate. A normal child without copied history does not inherit its parent's colour. The title's explanation gives the values and their origin.
 
-When there is no accepted input in the available history, the title has its ordinary colour. Loading, unverified and error states also have no colour, but do not mean there was no accepted input. If history cannot be read or the accepted input cannot be matched to its request, the explanation reports an error instead of treating it as absent.
+When there is no accepted input in the available history, the title has its ordinary colour. Loading, unverified and error states also have no colour, but do not mean there was no accepted input. If the working projection is in error because history cannot be read or the accepted input cannot be matched to its request, the title's explanation reports the error instead of treating it as absent.
 
 ## Execution index
 
 The index fills in the background for visible, nondeleted threads, including the archive, even when highlighting is off. In the plugin settings, **Execution index** shows the job type and state, processed and discovered counts, thread errors and the outcome. Counts can change as threads are added or removed. Use **Rebuild execution index** to start a rebuild; a request during an initial fill or rebuild joins the existing job shared by all windows. During recovery or synchronization the button may be disabled with a message to wait.
 
-The working index remains available and continues to receive updates during a rebuild. A successful rebuild replaces it; a failed rebuild keeps the working index and its progress can be retried. An error limited to the new index does not erase verified working data.
+The working index remains available and continues to receive updates during a rebuild. A successful rebuild replaces it; a failed rebuild keeps the working index and its progress can be retried. An error limited to the new index appears in the index status and does not erase the verified working projection.
 
 Interrupted work resumes automatically. When the plugin starts, cached results are unverified until checked. After reconnection, the index checks for missed changes in the background; updates may take time, and this is not an atomic snapshot across BB and the plugin. A history response can fail with HTTP **413** when even a single event exceeds the SDK response limit (approximately 8 MiB). The affected history is reported as an error, the full rebuild cannot succeed, and the working index remains in use. Rebuilding alone cannot make an oversized event readable.
 
