@@ -32,7 +32,9 @@ export function ExecutionProjectionSync() {
   }, [rpc, setIndexError]);
   const invalidate = useCallback((payload: unknown) => {
     refreshStatus();
-    if (typeof payload === "object" && payload !== null && "threadId" in payload && typeof payload.threadId === "string" && visible.current.has(payload.threadId)) queue.current?.add([payload.threadId]);
+    if (typeof payload === "object" && payload !== null && "threadId" in payload && typeof payload.threadId === "string") {
+      if (visible.current.has(payload.threadId)) queue.current?.add([payload.threadId]);
+    } else if (!(typeof payload === "object" && payload !== null && "progress" in payload)) queue.current?.add([...visible.current]);
   }, [refreshStatus]);
   useRealtime(EXECUTION_CHANGED_CHANNEL, invalidate);
   const connection = useRealtimeConnectionState();

@@ -68,6 +68,8 @@ export type ImportResult = z.infer<typeof importResultSchema>;
 export const projectFirstSidebarRpcContract = defineRpcContract({
   getExecutionProjections: { input: z.object({ threadIds: z.array(z.string().min(1).max(1024)).max(500) }).strict(), output: z.object({ projections: z.array(executionProjectionSchema) }).strict() },
   getExecutionIndexStatus: { input: z.null(), output: z.object({ state: z.enum(["loading", "running", "done", "error"]), total: z.number().int().nonnegative(), done: z.number().int().nonnegative(), errors: z.number().int().nonnegative() }).strict() },
+  getExecutionRebuildStatus: { input: z.null(), output: z.object({ state: z.enum(["loading", "running", "done", "error"]), kind: z.enum(["initial", "rebuild", "recovery"]), total: z.number().int().nonnegative(), done: z.number().int().nonnegative(), errors: z.number().int().nonnegative(), tooLarge: z.number().int().nonnegative() }).strict() },
+  startExecutionRebuild: { input: z.null(), output: z.object({ state: z.enum(["loading", "running", "done", "error"]), kind: z.enum(["initial", "rebuild", "recovery"]), total: z.number().int().nonnegative(), done: z.number().int().nonnegative(), errors: z.number().int().nonnegative(), tooLarge: z.number().int().nonnegative() }).strict() },
   getImportStatus: { input: z.null(), output: importResultSchema },
   importPreferences: { input: z.null(), output: importResultSchema },
   listPreferences: {
@@ -484,7 +486,8 @@ function requireFilterReadSuccess(result: FilterReadResult): FilterDocumentV1 {
 export default async function projectFirstSidebarPlugin(bb: BbPluginApi) {
   const projections = createExecutionProjectionStore(bb);
   projections.markUnverified();
-  registerCatalogueFill(bb, projections);
+  projections.prepareStartup();
+  const catalogue = registerCatalogueFill(bb, projections);
   const store = createPreferenceStore(bb);
   let writes: Promise<unknown> = Promise.resolve();
   function serialize<T>(operation: () => Promise<T>): Promise<T> {
@@ -504,6 +507,8 @@ export default async function projectFirstSidebarPlugin(bb: BbPluginApi) {
   bb.rpc.register(projectFirstSidebarRpcContract, {
     async getExecutionProjections({ threadIds }) { return { projections: projections.read(threadIds) }; },
     async getExecutionIndexStatus() { return projections.status(); },
+    async getExecutionRebuildStatus() { return { ...projections.status(), kind: projections.kind(), tooLarge: projections.tooLarge() }; },
+    async startExecutionRebuild() { return catalogue.startRebuild(); },
     async getImportStatus() { return importStatus; },
     importPreferences,
     async listPreferences() {

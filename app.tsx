@@ -1,4 +1,5 @@
 import { ExecutionProjectionSync } from "./app/execution/ExecutionProjectionSync.js";
+import { RebuildSettings } from "./app/execution/RebuildSettings.js";
 import { useCallback, useRef, useState } from "react";
 import { definePluginApp, type PluginThreadListProps } from "@get-bb/plugin-sdk/app";
 import { CompactViewportOverrideProvider } from "@/components/ui/hooks/use-compact-viewport";
@@ -79,6 +80,7 @@ export default definePluginApp((app) => {
     title: "Фильтры проектов",
     component: ProjectFilterEditor,
   });
+  app.slots.settingsSection({ id: "execution-index", title: "Execution index", component: RebuildSettings });
   app.slots.experimental_threadList({
     id: "project-first-sidebar",
     title: "Project-first sidebar",

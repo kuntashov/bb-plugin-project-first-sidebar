@@ -23,6 +23,7 @@ function transient(error: unknown): boolean {
 /** All reads and writes for an ID go through the same revision-fenced worker. */
 export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof createExecutionProjectionStore>) {
   let dispatch: ((id: string, membership: boolean, force?: boolean) => void) | undefined;
+  let requestScan: (() => void) | undefined;
   let load = 0;
   const early = new Set<string>();
   bb.events.on("experimental_thread.events", ({ thread }) => {
@@ -35,17 +36,19 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
       const revisions = new Map<string, number>();
       const membership = new Set<string>();
       const fullRead = new Set<string>();
+      const live = new Set<string>();
       const pending = new Set<string>();
       const running = new Set<string>();
       let snapshotChanges: Set<string> | undefined;
       let active = 0;
       let wake: (() => void) | undefined;
       const publish = (id?: string) => { if (!stale()) bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, id ? { threadId: id } : {}); };
-      const changed = (id: string, check: boolean, force = true) => {
+      const changed = (id: string, check: boolean, force = true, liveChange = true) => {
         if (stale()) return;
         revisions.set(id, (revisions.get(id) ?? 0) + 1);
         if (check) { membership.add(id); snapshotChanges?.add(id); }
         if (force) fullRead.add(id);
+        if (liveChange) live.add(id);
         pending.add(id);
         pump();
       };
@@ -60,8 +63,10 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
       };
       async function work(id: string) {
         const revision = revisions.get(id) ?? 0;
+        const token = store.token();
         const force = fullRead.delete(id);
-        const valid = () => !stale() && revision === (revisions.get(id) ?? 0);
+        const liveChange = live.delete(id);
+        const valid = () => !stale() && token === store.token() && revision === (revisions.get(id) ?? 0);
         try {
           if (membership.has(id)) {
             const rows = await retry(() => bb.sdk.threads.list({ threadIds: [id], includeHidden: false }));
@@ -87,16 +92,19 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
           }
           if (!valid()) return;
           const before = store.read([id])[0];
-          await retry(async () => { if (valid()) store.commit(id, result); });
+          await retry(async () => { if (valid()) store.commit(id, result, liveChange); });
           if (!valid()) return;
           if (JSON.stringify(before) !== JSON.stringify(store.read([id])[0])) publish(id);
+          else if (store.status().state === 'running') bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, { progress: true });
         } catch (error) {
           if (!valid()) return;
-          try { store.commit(id, { state: "error", reason: transient(error) ? "transient" : "unknown" }); }
-          catch { store.markFailed(id); }
+          try { store.commit(id, { state: "error", reason: transient(error) ? "transient" : "unknown" }, liveChange); }
+          catch { store.markFailed(id, liveChange); }
           publish(id);
         } finally {
           if (force && !valid() && !stale()) fullRead.add(id);
+          if (liveChange && !valid() && !stale()) live.add(id);
+          if (!valid() && !stale()) pending.add(id);
         }
       }
       function pump() {
@@ -127,6 +135,7 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
         if (scanRunning) return;
         scanRunning = true;
         try {
+          store.beginRecovery();
           while (scanRequested && !stale()) {
             scanRequested = false;
             const touched = new Set<string>(); snapshotChanges = touched;
@@ -146,15 +155,19 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
             // Recheck every ID observed during the snapshot, even if it was already processed.
             for (const id of touched) changed(id, true);
             for (const archived of [false, true]) {
-              for (const thread of threads) if (!touched.has(thread.id) && (thread.archivedAt !== null) === archived) changed(thread.id, false);
+              for (const thread of threads) if (!touched.has(thread.id) && (thread.archivedAt !== null) === archived) changed(thread.id, false, true, false);
               await drain();
               if (stale()) return;
             }
             await retry(async () => {
               while (!stale() && (pending.size || active)) await drain();
-              if (!stale()) store.finish();
+              if (!stale() && !scanRequested) store.finish();
             });
+            if (scanRequested) continue;
             publish();
+            if (store.status().state === 'done') {
+              try { store.cleanup(); } catch { bb.log.error("Execution index cleanup failed; it will be retried at startup"); }
+            }
           }
         } catch (error) {
           snapshotChanges = undefined;
@@ -168,16 +181,23 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
           if (scanRequested && !stale()) void scan();
         }
       };
+      requestScan = () => { void scan(); };
       const unsubscribeConnection = bb.sdk.subscribe({ event: "realtime:connection", callback: (event) => {
         if (event.state === "connected") void scan();
       } });
       for (const id of early) changed(id, true);
       early.clear();
-      const stop = () => { if (current === load) { ++load; dispatch = undefined; } unsubscribeThread(); unsubscribeConnection(); wake?.(); };
+      const stop = () => { if (current === load) { ++load; dispatch = undefined; requestScan = undefined; } unsubscribeThread(); unsubscribeConnection(); wake?.(); };
       signal.addEventListener("abort", stop, { once: true });
       if (signal.aborted) { stop(); return; }
       void scan();
       await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
     },
   });
+  return {
+    startRebuild() {
+      if (store.startRebuild()) { requestScan?.(); bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, { progress: true }); }
+      return { ...store.status(), kind: store.kind(), tooLarge: store.tooLarge() };
+    },
+  };
 }
