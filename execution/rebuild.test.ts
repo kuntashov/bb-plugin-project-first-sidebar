@@ -40,6 +40,49 @@ it("rechecks completed and pending IDs after an initial job is interrupted", asy
   service.controller.abort(); await service.done; await reloaded.harness.lifecycle.dispose();
 });
 
+it("preserves a done checkpoint during resume but waits for its recheck before finishing", async () => {
+  const threads = [makeThreadResponse({ id: "a", archivedAt: 1 }), makeThreadResponse({ id: "b" })];
+  let release: (() => void) | undefined;
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: { threads: {
+    list: async () => threads,
+    events: { list: async ({ threadId }) => { if (threadId === "a") await new Promise<void>((resolve) => { release = resolve; }); return []; } },
+  } } });
+  const store = createExecutionProjectionStore(bb);
+  store.prepareStartup();
+  store.beginManifest(threads);
+  store.commit("a", { state: "absent" });
+  const reloaded = await harness.lifecycle.reload(plugin);
+  reloaded.harness.sdk.stub("subscribe", () => () => {});
+  const service = reloaded.harness.behavior.runService("execution-catalogue");
+  await vi.waitFor(() => expect(release).toBeDefined());
+  expect(reloaded.bb.storage.database().prepare("SELECT state FROM execution_manifest WHERE thread_id = 'a'").get()).toEqual({ state: "done" });
+  expect(await reloaded.harness.behavior.callRpc("getExecutionRebuildStatus", null)).toMatchObject({ state: "running", total: 2, done: 2 });
+  expect(await reloaded.harness.behavior.callRpc("getExecutionProjections", { threadIds: ["a"] })).toEqual({ projections: [{ threadId: "a", state: "unverified" }] });
+  release!();
+  await vi.waitFor(async () => expect(await reloaded.harness.behavior.callRpc("getExecutionRebuildStatus", null)).toMatchObject({ state: "done" }));
+  service.controller.abort(); await service.done; await reloaded.harness.lifecycle.dispose();
+});
+
+it("retains completed rebuild checkpoints when retrying a failed generation", async () => {
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar" });
+  const store = createExecutionProjectionStore(bb);
+  const threads = [makeThreadResponse({ id: "a" }), makeThreadResponse({ id: "b", archivedAt: 1 })];
+  store.prepareStartup(); store.beginManifest(threads);
+  store.commit("a", { state: "absent" }); store.commit("b", { state: "absent" }); store.finish();
+  expect(store.startRebuild()).toBe(true);
+  store.beginManifest(threads);
+  store.commit("a", { state: "absent" }, false);
+  store.commit("b", { state: "error", reason: "too_large" }, false);
+  store.finish();
+  expect(store.startRebuild()).toBe(true);
+  store.beginManifest([makeThreadResponse({ id: "a", archivedAt: 1 }), makeThreadResponse({ id: "b" })]);
+  expect(bb.storage.database().prepare("SELECT thread_id, state, archived FROM execution_manifest WHERE generation = 2 ORDER BY thread_id").all()).toEqual([
+    { thread_id: "a", state: "done", archived: 1 }, { thread_id: "b", state: "error", archived: 0 },
+  ]);
+  expect(bb.storage.database().prepare("SELECT active_generation FROM execution_meta").get()).toEqual({ active_generation: 1 });
+  await harness.lifecycle.dispose();
+});
+
 it("finishes failed recovery after a live repair drains the queue", async () => {
   const thread = makeThreadResponse({ id: "t" });
   let failing = false;

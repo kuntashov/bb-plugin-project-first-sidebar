@@ -5,6 +5,9 @@ import { executionProjectionSchema, type ExecutionProjection } from "../shared/e
 export function createExecutionProjectionStore(bb: BbPluginApi) {
   const db = bb.storage.database();
   let storageFailure = false;
+  // Only this store changes jobs; keep the fence independent of fallible SQLite reads.
+  let fence = 0;
+  let building = false;
   const failedIds = new Set<string>();
   const workingFailures = new Set<string>();
   bb.storage.migrate(db, [
@@ -19,13 +22,17 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
   const target = () => job()?.generation ?? active();
   const store = {
     prepareStartup() {
+      let nextBuilding = false;
       db.transaction(() => {
         const current = job();
         if (!current) db.prepare("INSERT INTO execution_job (id, generation, state, kind) VALUES (1, ?, 'running', 'initial')").run(active());
         else if (current.state === 'done') db.prepare("UPDATE execution_job SET generation = ?, state = 'running', kind = 'recovery', failure_scope = NULL WHERE id = 1").run(active());
         else if (current.state === 'running') db.prepare("UPDATE execution_manifest SET state = 'pending' WHERE generation = ? AND state = 'running'").run(current.generation);
         db.prepare("UPDATE execution_job SET epoch = epoch + 1 WHERE id = 1").run();
+        nextBuilding = job()?.kind === 'rebuild' && target() !== active();
       })();
+      building = nextBuilding;
+      fence++;
       try {
         db.transaction(() => {
           db.prepare("DELETE FROM execution_projection WHERE generation NOT IN (?, ?)").run(active(), target());
@@ -34,6 +41,7 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
       } catch { bb.log.error("Execution index cleanup failed; it will be retried after reconciliation"); }
     },
     startRebuild() {
+      let nextBuilding = building;
       const started = db.transaction(() => {
         const current = job();
         if (!current || current.state === 'running') return false;
@@ -48,15 +56,18 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
           db.prepare("UPDATE execution_job SET generation = ?, kind = 'rebuild', state = 'running', failure_scope = NULL WHERE id = 1").run(generation);
         }
         db.prepare("UPDATE execution_job SET epoch = epoch + 1 WHERE id = 1").run();
+        nextBuilding = job()?.kind === 'rebuild' && target() !== active();
         return true;
       })();
-      if (started) storageFailure = false;
+      if (started) { storageFailure = false; building = nextBuilding; fence++; }
       return started;
     },
     beginRecovery() {
-      db.prepare("UPDATE execution_job SET generation = ?, kind = 'recovery', state = 'running', failure_scope = NULL, epoch = epoch + 1 WHERE id = 1 AND state = 'done'").run(active());
+      const generation = active();
+      const changed = db.prepare("UPDATE execution_job SET generation = ?, kind = 'recovery', state = 'running', failure_scope = NULL, epoch = epoch + 1 WHERE id = 1 AND (state = 'done' OR (state = 'error' AND failure_scope = 'catalogue' AND generation = ? AND (SELECT initial_completed FROM execution_meta WHERE id = 1) = 1))").run(generation, generation).changes;
+      if (changed) { building = false; fence++; }
     },
-    token() { return `${target()}:${job()?.epoch ?? 0}`; },
+    token() { return fence; },
     kind() { return (job()?.kind ?? 'initial') as 'initial' | 'rebuild' | 'recovery'; },
     canFinishRepair() {
       return !!db.prepare("SELECT 1 FROM execution_job WHERE id = 1 AND kind IN ('initial', 'recovery') AND state = 'error' AND failure_scope IS NULL").get();
@@ -91,7 +102,7 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
           db.prepare("DELETE FROM execution_manifest WHERE generation IN (?, ?) AND thread_id = ?").run(active(), target(), id);
           removed.push(id);
         }
-        const insert = db.prepare("INSERT INTO execution_manifest (generation, thread_id, archived, state) VALUES (?, ?, ?, 'pending') ON CONFLICT(generation, thread_id) DO UPDATE SET archived = excluded.archived, state = 'pending'");
+        const insert = db.prepare("INSERT INTO execution_manifest (generation, thread_id, archived, state) VALUES (?, ?, ?, 'pending') ON CONFLICT(generation, thread_id) DO UPDATE SET archived = excluded.archived");
         for (const thread of threads) if (!changed.has(thread.id)) insert.run(target(), thread.id, thread.archivedAt === null ? 0 : 1);
         if (!job()) db.prepare("INSERT INTO execution_job (id, generation, state, kind) VALUES (1, ?, 'running', 'initial')").run(active());
         else if (job()?.state !== 'running') db.prepare("UPDATE execution_job SET state = 'running', failure_scope = NULL WHERE id = 1").run();
@@ -134,15 +145,21 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
       failedIds.delete(threadId);
       workingFailures.delete(threadId);
     },
-    markFailed(threadId: string, live = true) { failedIds.add(threadId); if (live || target() === active()) workingFailures.add(threadId); },
+    markFailed(threadId: string, live = true) { failedIds.add(threadId); if (live || !building) workingFailures.add(threadId); },
     finish() {
+      let cutover = false;
+      let completed = false;
       db.transaction(() => {
         const generation = target();
         db.prepare("UPDATE execution_job SET state = CASE WHEN ? > 0 OR EXISTS (SELECT 1 FROM execution_manifest WHERE generation = ? AND state != 'done') OR EXISTS (SELECT 1 FROM execution_projection WHERE generation = ? AND state NOT IN ('ready', 'absent')) OR EXISTS (SELECT 1 FROM execution_manifest m LEFT JOIN execution_projection p ON p.generation = m.generation AND p.thread_id = m.thread_id WHERE m.generation = ? AND p.thread_id IS NULL) THEN 'error' ELSE 'done' END, failure_scope = NULL WHERE id = 1").run(failedIds.size, generation, generation, generation);
-        if (job()?.state === 'done' && job()?.kind === 'initial') db.prepare("UPDATE execution_meta SET initial_completed = 1 WHERE id = 1").run();
-        if (job()?.state === 'done' && job()?.kind === 'rebuild') db.prepare("UPDATE execution_meta SET active_generation = ? WHERE id = 1").run(generation);
+        const current = job();
+        completed = current?.state === 'done';
+        if (completed && current?.kind === 'initial') db.prepare("UPDATE execution_meta SET initial_completed = 1 WHERE id = 1").run();
+        if (completed && current?.kind === 'rebuild') { db.prepare("UPDATE execution_meta SET active_generation = ? WHERE id = 1").run(generation); cutover = true; }
       })();
+      if (cutover) building = false;
       storageFailure = false;
+      return completed;
     },
     fail() {
       storageFailure = true;

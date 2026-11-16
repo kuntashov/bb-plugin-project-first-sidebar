@@ -55,8 +55,8 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
       const retry = async <T>(operation: () => Promise<T>, onFailure?: () => void): Promise<T> => {
         for (let attempt = 0; ; attempt++) {
           try { return await operation(); } catch (error) {
-            if (!stale()) onFailure?.();
             if (attempt === 3 || !transient(error) || stale()) throw error;
+            onFailure?.();
             await delay([1000, 5000, 15000][attempt]!, signal);
             if (stale()) throw error;
           }
@@ -88,8 +88,10 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
             if (!valid()) return;
             membership.delete(id);
           }
-          if (!store.contains(id)) return;
-          const previous = force ? undefined : store.verified(id);
+          const exists = await retry(async () => valid() && store.contains(id), recordFailure);
+          if (!valid() || !exists) return;
+          const previous = force ? undefined : await retry(async () => valid() ? store.verified(id) : undefined, recordFailure);
+          if (!valid()) return;
           const listHistory: typeof bb.sdk.threads.events.list = (args) => {
             if (!valid()) return Promise.reject(new Error("Execution read superseded"));
             return bb.sdk.threads.events.list(args);
@@ -103,12 +105,17 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
             result = await readAcceptedProjection(listHistory, id, previous);
           }
           if (!valid()) return;
-          const before = store.read([id])[0];
-          const statusBefore = store.status();
-          await retry(async () => { if (valid()) store.commit(id, result, liveChange); }, recordFailure);
+          const before = await retry(async () => valid() ? store.read([id])[0] : undefined, recordFailure);
+          const statusBefore = await retry(async () => valid() ? store.status() : undefined, recordFailure);
           if (!valid()) return;
-          if (JSON.stringify(before) !== JSON.stringify(store.read([id])[0])) publish(id);
-          else if (store.status().state === 'running' || JSON.stringify(statusBefore) !== JSON.stringify(store.status())) bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, { progress: true });
+          const outcome = await retry(async () => {
+            if (!valid()) return undefined;
+            store.commit(id, result, liveChange);
+            return { after: store.read([id])[0], status: store.status() };
+          }, recordFailure);
+          if (!valid() || !outcome) return;
+          if (JSON.stringify(before) !== JSON.stringify(outcome.after)) publish(id);
+          else if (outcome.status.state === 'running' || JSON.stringify(statusBefore) !== JSON.stringify(outcome.status)) bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, { progress: true });
         } catch (error) {
           if (!valid()) return;
           try { store.commit(id, { state: "error", reason: transient(error) ? "transient" : "unknown" }, liveChange); }
@@ -129,8 +136,12 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
             running.delete(id); active--;
             if (!stale()) pump();
             if (!stale() && !scanRunning && !pending.size && !active) {
-              try { if (store.canFinishRepair()) { store.finish(); publish(); } }
-              catch { /* the saved error remains available for retry */ }
+              void retry(async () => {
+                if (!stale() && !scanRunning && !pending.size && !active && store.canFinishRepair()) { store.finish(); publish(); }
+              }, () => publish()).catch(() => {
+                // The saved error remains available for the next trigger.
+                publish();
+              });
             }
             wake?.();
           });
@@ -151,12 +162,17 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
         scanRequested = true;
         if (scanRunning) return;
         scanRunning = true;
+        const recordScanFailure = () => {
+          if (stale()) return;
+          try { store.fail(); } catch { /* storage is unavailable */ }
+          publish();
+        };
         try {
-          store.beginRecovery();
+          await retry(async () => { if (!stale()) store.beginRecovery(); }, recordScanFailure);
           while (scanRequested && !stale()) {
             scanRequested = false;
             const touched = new Set<string>(); snapshotChanges = touched;
-            const threads = await retry(() => bb.sdk.threads.list({ includeHidden: false }));
+            const threads = await retry(() => bb.sdk.threads.list({ includeHidden: false }), recordScanFailure);
             if (stale()) return;
             const visible = new Set(threads.map((thread) => thread.id));
             let removed: string[] = [];
@@ -165,7 +181,7 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
               removed = store.ids().filter((id) => !visible.has(id) && !touched.has(id));
               for (const id of removed) revisions.set(id, (revisions.get(id) ?? 0) + 1);
               store.beginManifest(threads, touched);
-            });
+            }, recordScanFailure);
             if (stale()) return;
             snapshotChanges = undefined;
             for (const id of removed) publish(id);
@@ -176,13 +192,14 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
               await drain();
               if (stale()) return;
             }
-            await retry(async () => {
+            const completed = await retry(async () => {
               while (!stale() && (pending.size || active)) await drain();
-              if (!stale() && !scanRequested) store.finish();
-            });
+              if (!stale() && !scanRequested) return store.finish();
+              return false;
+            }, recordScanFailure);
             if (scanRequested) continue;
             publish();
-            if (store.status().state === 'done') {
+            if (completed) {
               try { store.cleanup(); } catch { bb.log.error("Execution index cleanup failed; it will be retried at startup"); }
             }
           }

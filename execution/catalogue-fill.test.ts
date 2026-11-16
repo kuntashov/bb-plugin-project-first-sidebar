@@ -604,6 +604,126 @@ it("bounds transient catalogue retries and consumes one queued connected trigger
   } finally { vi.useRealTimers(); }
 });
 
+it("persists a reconnect catalogue error before backoff and resumes after success", async () => {
+  vi.useFakeTimers();
+  try {
+    const callbacks = new Map<string, (event: never) => void>();
+    let failing = false;
+    const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: {
+      subscribe: ({ event, callback }) => { callbacks.set(event, callback as (event: never) => void); return () => callbacks.delete(event); },
+      threads: { list: async () => { if (failing) throw Object.assign(new Error("unavailable"), { status: 503 }); return [makeThreadResponse({ id: "t" })]; }, events: { list: async () => [] } },
+    } });
+    await plugin(bb);
+    const service = harness.behavior.runService("execution-catalogue");
+    await vi.advanceTimersByTimeAsync(0);
+    failing = true;
+    callbacks.get("realtime:connection")!({ state: "connected", reconnected: true } as never);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await harness.behavior.callRpc("getExecutionRebuildStatus", null)).toMatchObject({ state: "error", kind: "recovery" });
+    expect(bb.storage.database().prepare("SELECT state, failure_scope FROM execution_job").get()).toEqual({ state: "error", failure_scope: "catalogue" });
+    failing = false;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await harness.behavior.callRpc("getExecutionRebuildStatus", null)).toMatchObject({ state: "done", kind: "recovery" });
+    service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+  } finally { vi.useRealTimers(); }
+});
+
+it("enters recovery after a busy job transition and persists the failure during backoff", async () => {
+  vi.useFakeTimers();
+  try {
+    const callbacks = new Map<string, (event: never) => void>();
+    const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: {
+      subscribe: ({ event, callback }) => { callbacks.set(event, callback as (event: never) => void); return () => callbacks.delete(event); },
+      threads: { list: async () => [makeThreadResponse({ id: "t" })], events: { list: async () => [] } },
+    } });
+    const store = createExecutionProjectionStore(bb);
+    store.prepareStartup(); registerCatalogueFill(bb, store);
+    const service = harness.behavior.runService("execution-catalogue");
+    await vi.advanceTimersByTimeAsync(0);
+    const beginRecovery = store.beginRecovery.bind(store);
+    let busy = true;
+    vi.spyOn(store, "beginRecovery").mockImplementation(() => { if (busy) throw Object.assign(new Error("locked"), { code: "SQLITE_BUSY" }); beginRecovery(); });
+    callbacks.get("realtime:connection")!({ state: "connected", reconnected: true } as never);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.status().state).toBe("error");
+    expect(bb.storage.database().prepare("SELECT failure_scope FROM execution_job").get()).toEqual({ failure_scope: "catalogue" });
+    busy = false;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(store.status().state).toBe("done");
+    expect(store.kind()).toBe("recovery");
+    service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+  } finally { vi.useRealTimers(); }
+});
+
+it("retries a busy writer read with a visible error and fences an intervening event", async () => {
+  vi.useFakeTimers();
+  try {
+    const thread = makeThreadResponse({ id: "t" });
+    const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: { threads: { list: async () => [thread], events: { list: async () => [] } } } });
+    const store = createExecutionProjectionStore(bb);
+    store.prepareStartup();
+    registerCatalogueFill(bb, store);
+    harness.sdk.stub("subscribe", () => () => {});
+    const service = harness.behavior.runService("execution-catalogue");
+    await vi.advanceTimersByTimeAsync(0);
+    const contains = store.contains.bind(store);
+    const times: number[] = [];
+    let busy = true;
+    vi.spyOn(store, "contains").mockImplementation((id) => { if (busy) { times.push(Date.now()); throw Object.assign(new Error("locked"), { code: "SQLITE_BUSY" }); } return contains(id); });
+    await harness.behavior.emitThreadEvent("experimental_thread.events", { thread, sequence: 1 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.read(["t"])).toEqual([{ threadId: "t", state: "error" }]);
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(times.map((time) => time - times[0]!)).toEqual([0, 1000, 6000]);
+    busy = false;
+    await harness.behavior.emitThreadEvent("experimental_thread.events", { thread, sequence: 2 });
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(store.read(["t"])).toEqual([{ threadId: "t", state: "absent" }]);
+    expect(times).toHaveLength(3);
+    service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+  } finally { vi.useRealTimers(); }
+});
+
+it("survives SQLite busy on job reads and retries the ID after exhaustion", async () => {
+  vi.useFakeTimers();
+  try {
+    const thread = makeThreadResponse({ id: "t" });
+    const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: { threads: { list: async () => [thread], events: { list: async () => [] } } } });
+    const store = createExecutionProjectionStore(bb);
+    store.prepareStartup(); registerCatalogueFill(bb, store);
+    harness.sdk.stub("subscribe", () => () => {});
+    const service = harness.behavior.runService("execution-catalogue");
+    await vi.advanceTimersByTimeAsync(0);
+    const db = bb.storage.database();
+    const prepare = db.prepare.bind(db);
+    let busy = true;
+    const times = new Set<number>();
+    vi.spyOn(db, "prepare").mockImplementation((sql) => {
+      if (busy && sql === "SELECT generation, state, kind, epoch FROM execution_job WHERE id = 1") { times.add(Date.now()); throw Object.assign(new Error("locked"), { code: "SQLITE_BUSY" }); }
+      return prepare(sql);
+    });
+    await harness.behavior.emitThreadEvent("experimental_thread.events", { thread, sequence: 1 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.read(["t"])).toEqual([{ threadId: "t", state: "error" }]);
+    await vi.advanceTimersByTimeAsync(21000);
+    const values = [...times];
+    expect(values.map((time) => time - values[0]!)).toEqual([0, 1000, 6000, 21000]);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(times.size).toBe(4);
+    busy = false;
+    await harness.behavior.emitThreadEvent("experimental_thread.events", { thread, sequence: 2 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.read(["t"])).toEqual([{ threadId: "t", state: "absent" }]);
+    busy = true;
+    await harness.behavior.emitThreadEvent("experimental_thread.events", { thread, sequence: 3 });
+    await vi.advanceTimersByTimeAsync(0);
+    const attemptsBeforeAbort = times.size;
+    service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(times.size).toBe(attemptsBeforeAbort);
+  } finally { vi.useRealTimers(); }
+});
+
 it("persists a live history error during backoff, exhausts retries, and repairs on a new event", async () => {
   vi.useFakeTimers();
   try {
