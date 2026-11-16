@@ -40,7 +40,6 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
       let snapshotChanges: Set<string> | undefined;
       let active = 0;
       let wake: (() => void) | undefined;
-      let storageFailed = false;
       const publish = (id?: string) => { if (!stale()) bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, id ? { threadId: id } : {}); };
       const changed = (id: string, check: boolean, force = true) => {
         if (stale()) return;
@@ -94,7 +93,7 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
         } catch (error) {
           if (!valid()) return;
           try { store.commit(id, { state: "error", reason: transient(error) ? "transient" : "unknown" }); }
-          catch { storageFailed = true; store.markFailed(id); try { store.fail(); } catch { /* status still reports failure */ } }
+          catch { store.markFailed(id); }
           publish(id);
         } finally {
           if (force && !valid() && !stale()) fullRead.add(id);
@@ -151,7 +150,10 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
               await drain();
               if (stale()) return;
             }
-            await retry(async () => { if (!stale()) { if (storageFailed) store.fail(); else store.finish(); } });
+            await retry(async () => {
+              while (!stale() && (pending.size || active)) await drain();
+              if (!stale()) store.finish();
+            });
             publish();
           }
         } catch (error) {
@@ -170,8 +172,9 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
       early.clear();
       const stop = () => { if (current === load) { ++load; dispatch = undefined; } unsubscribeThread(); unsubscribeConnection(); wake?.(); };
       signal.addEventListener("abort", stop, { once: true });
-      await scan();
-      if (!signal.aborted) await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
+      if (signal.aborted) { stop(); return; }
+      void scan();
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true }));
     },
   });
 }

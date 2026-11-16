@@ -303,3 +303,236 @@ it("reconciles offline additions and removals after the first connected event", 
   await vi.waitFor(async () => expect(await read(["old", "new"])).toEqual([{ threadId: "old", state: "loading" }, { threadId: "new", state: "absent" }]));
   service.controller.abort(); await service.done; await harness.lifecycle.dispose();
 });
+
+it("recovers a failed catalogue snapshot after reconnect", async () => {
+  let failed = true;
+  const callbacks = new Map<string, (event: never) => void>();
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: {
+    subscribe: ({ event, callback }) => { callbacks.set(event, callback as (event: never) => void); return () => callbacks.delete(event); },
+    threads: { list: async () => { if (failed) throw new Error("unavailable"); return [makeThreadResponse({ id: "t" })]; }, events: { list: async () => [] } },
+  } });
+  await plugin(bb);
+  const service = harness.behavior.runService("execution-catalogue");
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "error" }));
+  failed = false;
+  callbacks.get("realtime:connection")!({ state: "connected", reconnected: true, reconnectDelayMs: null } as never);
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toEqual({ state: "done", total: 1, done: 1, errors: 0 }));
+  service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+});
+
+it("reports live history failure and recovery without ending a still-running full job", async () => {
+  const a = makeThreadResponse({ id: "a" }), b = makeThreadResponse({ id: "b" });
+  let fail = false, release: (() => void) | undefined;
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: {
+    subscribe: () => () => {}, threads: { list: async () => [a, b], events: { list: async ({ threadId }) => {
+      if (threadId === "b") await new Promise<void>((resolve) => { release = resolve; });
+      if (threadId === "a" && fail) throw Object.assign(new Error("large"), { status: 413 });
+      return [];
+    } } },
+  } });
+  await plugin(bb);
+  const service = harness.behavior.runService("execution-catalogue");
+  await vi.waitFor(() => expect(release).toBeDefined());
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionProjections", { threadIds: ["a"] })).toEqual({ projections: [{ threadId: "a", state: "absent" }] }));
+  fail = true;
+  await harness.behavior.emitThreadEvent("experimental_thread.events", { thread: a, sequence: 2 });
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toEqual({ state: "running", total: 2, done: 0, errors: 1 }));
+  fail = false;
+  await harness.behavior.emitThreadEvent("experimental_thread.events", { thread: a, sequence: 3 });
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toEqual({ state: "running", total: 2, done: 1, errors: 0 }));
+  release!();
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toEqual({ state: "done", total: 2, done: 2, errors: 0 }));
+  fail = true;
+  await harness.behavior.emitThreadEvent("experimental_thread.events", { thread: a, sequence: 4 });
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toEqual({ state: "error", total: 2, done: 1, errors: 1 }));
+  fail = false;
+  await harness.behavior.emitThreadEvent("experimental_thread.events", { thread: a, sequence: 5 });
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toEqual({ state: "done", total: 2, done: 2, errors: 0 }));
+  service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+});
+
+it("reports an unsuccessful membership lookup for a new ID and recovers on the next event", async () => {
+  const t = makeThreadResponse({ id: "new" });
+  let fail = true;
+  const callbacks = new Map<string, (event: never) => void>();
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: {
+    subscribe: ({ event, callback }) => { callbacks.set(event, callback as (event: never) => void); return () => callbacks.delete(event); },
+    threads: { list: async (args) => { if (!args?.threadIds) return []; if (fail) throw new Error("unavailable"); return [t]; }, events: { list: async () => [] } },
+  } });
+  await plugin(bb);
+  const service = harness.behavior.runService("execution-catalogue");
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "done" }));
+  const notify = () => callbacks.get("thread:changed")!({ entity: "thread", id: "new", changes: ["thread-created"] } as never);
+  notify();
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "error", errors: 1 }));
+  expect(await harness.behavior.callRpc("getExecutionProjections", { threadIds: ["new"] })).toEqual({ projections: [{ threadId: "new", state: "error" }] });
+  fail = false; notify();
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toEqual({ state: "done", total: 1, done: 1, errors: 0 }));
+  service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+});
+
+it("stops promptly while the initial catalogue request is unresolved and fences its late result", async () => {
+  let release: ((value: ReturnType<typeof makeThreadResponse>[]) => void) | undefined;
+  let subscriptions = 0;
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: {
+    subscribe: () => { subscriptions++; return () => { subscriptions--; }; },
+    threads: { list: async () => new Promise((resolve) => { release = resolve; }), events: { list: async () => [] } },
+  } });
+  await plugin(bb);
+  const service = harness.behavior.runService("execution-catalogue");
+  await vi.waitFor(() => expect(release).toBeDefined());
+  service.controller.abort();
+  await expect(Promise.race([service.done.then(() => "stopped"), new Promise((resolve) => setTimeout(() => resolve("timeout"), 200))])).resolves.toBe("stopped");
+  expect(subscriptions).toBe(0);
+  await harness.lifecycle.dispose();
+  release!([makeThreadResponse({ id: "late" })]);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(harness.inspection.realtimeSignals).toHaveLength(0);
+});
+
+it("clears an unpersisted per-ID storage failure after successful reconciliation", async () => {
+  const t = makeThreadResponse({ id: "t" });
+  const callbacks = new Map<string, (event: never) => void>();
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: {
+    subscribe: ({ event, callback }) => { callbacks.set(event, callback as (event: never) => void); return () => callbacks.delete(event); },
+    threads: { list: async () => [t], events: { list: async () => [] } },
+  } });
+  await plugin(bb);
+  bb.storage.database().exec("CREATE TRIGGER reject_result BEFORE UPDATE ON execution_manifest WHEN NEW.thread_id = 't' BEGIN SELECT RAISE(ABORT, 'failure'); END");
+  const service = harness.behavior.runService("execution-catalogue");
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "error", errors: 1 }));
+  expect(await harness.behavior.callRpc("getExecutionProjections", { threadIds: ["t"] })).toEqual({ projections: [{ threadId: "t", state: "error" }] });
+  bb.storage.database().exec("DROP TRIGGER reject_result");
+  callbacks.get("realtime:connection")!({ state: "connected", reconnected: true, reconnectDelayMs: null } as never);
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toEqual({ state: "done", total: 1, done: 1, errors: 0 }));
+  expect(await harness.behavior.callRpc("getExecutionProjections", { threadIds: ["t"] })).toEqual({ projections: [{ threadId: "t", state: "absent" }] });
+  service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+});
+
+it("removes a failed unknown lookup after a later successful full catalogue excludes it", async () => {
+  const callbacks = new Map<string, (event: never) => void>();
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: {
+    subscribe: ({ event, callback }) => { callbacks.set(event, callback as (event: never) => void); return () => callbacks.delete(event); },
+    threads: { list: async (args) => { if (args?.threadIds) throw new Error("unavailable"); return []; }, events: { list: async () => [] } },
+  } });
+  await plugin(bb);
+  const service = harness.behavior.runService("execution-catalogue");
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "done" }));
+  callbacks.get("thread:changed")!({ entity: "thread", id: "unknown", changes: ["thread-created"] } as never);
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "error", errors: 1 }));
+  callbacks.get("realtime:connection")!({ state: "connected", reconnected: true, reconnectDelayMs: null } as never);
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toEqual({ state: "done", total: 0, done: 0, errors: 0 }));
+  expect(await harness.behavior.callRpc("getExecutionProjections", { threadIds: ["unknown"] })).toEqual({ projections: [{ threadId: "unknown", state: "loading" }] });
+  expect(harness.inspection.realtimeSignals.some((signal) => JSON.stringify(signal).includes('"threadId":"unknown"'))).toBe(true);
+  service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+});
+
+it("retains a catalogue-wide failure across plugin reload until a successful full scan", async () => {
+  let fail = false;
+  const callbacks = new Map<string, (event: never) => void>();
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: {
+    subscribe: ({ event, callback }) => { callbacks.set(event, callback as (event: never) => void); return () => callbacks.delete(event); },
+    threads: { list: async () => { if (fail) throw new Error("unavailable"); return [makeThreadResponse({ id: "t" })]; }, events: { list: async () => [] } },
+  } });
+  await plugin(bb);
+  harness.behavior.runService("execution-catalogue");
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "done" }));
+  fail = true;
+  callbacks.get("realtime:connection")!({ state: "connected", reconnected: true, reconnectDelayMs: null } as never);
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "error", errors: 0 }));
+  const reloaded = await harness.lifecycle.reload(plugin);
+  expect(await reloaded.harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "error", errors: 0 });
+  await reloaded.harness.lifecycle.dispose();
+});
+
+it("recovers an initially failed history from a later live event", async () => {
+  const t = makeThreadResponse({ id: "t" });
+  let fail = true;
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: {
+    subscribe: () => () => {},
+    threads: { list: async () => [t], events: { list: async () => { if (fail) throw Object.assign(new Error("large"), { status: 413 }); return []; } } },
+  } });
+  await plugin(bb);
+  const service = harness.behavior.runService("execution-catalogue");
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toEqual({ state: "error", total: 1, done: 0, errors: 1 }));
+  fail = false;
+  await harness.behavior.emitThreadEvent("experimental_thread.events", { thread: t, sequence: 2 });
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toEqual({ state: "done", total: 1, done: 1, errors: 0 }));
+  service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+});
+
+it("reconciles a global history-rewritten notification after rollback and removal of accepted", async () => {
+  const t = makeThreadResponse({ id: "t" });
+  let execution: { seq: number; level: string } | null = { seq: 8, level: "max" };
+  const callbacks = new Map<string, (event: never) => void>();
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: {
+    subscribe: ({ event, callback }) => { callbacks.set(event, callback as (event: never) => void); return () => callbacks.delete(event); },
+    threads: { list: async () => [t], events: { list: async ({ types }) => {
+      const value = execution;
+      if (!value) return [];
+      if (types?.includes("turn/input/accepted")) return [{ id: `a${value.seq}`, seq: value.seq, type: "turn/input/accepted", data: { clientRequestId: `r${value.seq}` } }] as never;
+      return [{ id: `q${value.seq}`, seq: value.seq - 1, type: "client/turn/requested", data: { requestId: `r${value.seq}`, execution: { reasoningLevel: value.level, serviceTier: "fast" } } }] as never;
+    } } },
+  } });
+  await plugin(bb);
+  const service = harness.behavior.runService("execution-catalogue");
+  const read = async () => (await harness.behavior.callRpc("getExecutionProjections", { threadIds: ["t"] }) as { projections: unknown[] }).projections[0];
+  await vi.waitFor(async () => expect(await read()).toMatchObject({ state: "ready", reasoningLevel: "max" }));
+  const rewrite = () => callbacks.get("thread:changed")!({ entity: "thread", id: "t", changes: ["history-rewritten"] } as never);
+  execution = { seq: 3, level: "high" }; rewrite();
+  await vi.waitFor(async () => expect(await read()).toMatchObject({ state: "ready", reasoningLevel: "high" }));
+  execution = null; rewrite();
+  await vi.waitFor(async () => expect(await read()).toEqual({ threadId: "t", state: "absent" }));
+  execution = { seq: 10, level: "low" };
+  callbacks.get("thread:changed")!({ entity: "thread", id: "t", changes: ["events-appended"] } as never);
+  await harness.behavior.emitThreadEvent("experimental_thread.events", { thread: t, sequence: 10 });
+  await vi.waitFor(async () => expect(await read()).toMatchObject({ state: "ready", reasoningLevel: "low" }));
+  service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+});
+
+it("keeps the projection when a detail-only compact removes unrelated output", async () => {
+  const t = makeThreadResponse({ id: "t" });
+  const subscriptions: Array<{ event: string; threadId?: string; callback: (value: never) => void }> = [];
+  const subscribe = vi.fn((input: unknown) => {
+    const subscription = input as { event: string; threadId?: string; callback: (value: never) => void };
+    subscriptions.push(subscription);
+    return () => { subscriptions.splice(subscriptions.indexOf(subscription), 1); };
+  });
+  let events = [
+    { id: "q", seq: 1, type: "client/turn/requested", data: { requestId: "r", execution: { reasoningLevel: "high", serviceTier: "fast" } } },
+    { id: "a", seq: 2, type: "turn/input/accepted", data: { clientRequestId: "r" } },
+    { id: "output", seq: 3, type: "item/commandExecution/outputDelta", data: {} },
+  ];
+  const history = vi.fn(async ({ types }: { types?: readonly string[] }) => events.filter((event) => types?.includes(event.type)));
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: { subscribe, threads: { list: async () => [t], events: { list: history as never } } } });
+  await plugin(bb);
+  const service = harness.behavior.runService("execution-catalogue");
+  const read = async () => (await harness.behavior.callRpc("getExecutionProjections", { threadIds: ["t"] }) as { projections: unknown[] }).projections[0];
+  await vi.waitFor(async () => expect(await read()).toMatchObject({ state: "ready", reasoningLevel: "high", serviceTier: "fast" }));
+  expect(subscriptions.filter((entry) => entry.event === "thread:changed")).toHaveLength(1);
+  // Match BB 0.48.1 routing: compact-only notifications go to detail targets.
+  events = events.filter((event) => event.id !== "output");
+  for (const entry of subscriptions.filter((entry) => entry.event === "thread:changed" && entry.threadId === t.id)) {
+    entry.callback({ entity: "thread", id: t.id, changes: ["history-compacted"] } as never);
+  }
+  expect(history).toHaveBeenCalledTimes(2);
+  expect(await read()).toMatchObject({ state: "ready", reasoningLevel: "high", serviceTier: "fast" });
+  service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+});
+
+it("retains the error of an unknown ID across reload until catalogue reconciliation", async () => {
+  const callbacks = new Map<string, (event: never) => void>();
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: {
+    subscribe: ({ event, callback }) => { callbacks.set(event, callback as (event: never) => void); return () => callbacks.delete(event); },
+    threads: { list: async (args) => { if (args?.threadIds) throw new Error("unavailable"); return []; }, events: { list: async () => [] } },
+  } });
+  await plugin(bb);
+  harness.behavior.runService("execution-catalogue");
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "done" }));
+  callbacks.get("thread:changed")!({ entity: "thread", id: "unknown", changes: ["thread-created"] } as never);
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "error", errors: 1 }));
+  const reloaded = await harness.lifecycle.reload(plugin);
+  expect(await reloaded.harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "error", errors: 1 });
+  expect(await reloaded.harness.behavior.callRpc("getExecutionProjections", { threadIds: ["unknown"] })).toEqual({ projections: [{ threadId: "unknown", state: "error" }] });
+  await reloaded.harness.lifecycle.dispose();
+});
