@@ -717,7 +717,7 @@ function ThreadRowComponent({
               onDoubleClick={isEditing ? undefined : startTitleEditing}
               aria-label={linkLabel}
               aria-keyshortcuts={shortcut?.ariaKeyshortcuts}
-              className="absolute inset-0 rounded-md outline-none"
+              className="absolute inset-0 rounded-md outline-none ring-sidebar-ring focus-visible:ring-2"
             />
           </TooltipTrigger>
           <TooltipContent side="top">

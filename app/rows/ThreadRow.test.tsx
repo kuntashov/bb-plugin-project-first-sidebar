@@ -390,6 +390,9 @@ describe("ThreadRow", () => {
     const link = screen.getByRole("link", { name: /Open Compare Mention target in Mention project/ });
     fireEvent.keyDown(document, { key: "Tab" });
     act(() => link.focus());
+    expect(document.activeElement).toBe(link);
+    expect(link.classList.contains("ring-sidebar-ring")).toBe(true);
+    expect(link.classList.contains("focus-visible:ring-2")).toBe(true);
     const tooltip = await screen.findByRole("tooltip");
     expect(tooltip.textContent).toContain("Compare Mention target in Mention project");
     expect(tooltip.textContent).toContain("reasoning unknown; service tier fast");
