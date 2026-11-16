@@ -23,6 +23,7 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
         const threads = await bb.sdk.threads.list({ includeHidden: false });
         if (stale()) return;
         store.beginManifest(threads);
+        let storageFailed = false;
         // Finish all active units before starting the archive.
         for (const archived of [false, true]) {
           const ids = threads.filter((thread) => (thread.archivedAt !== null) === archived).map((thread) => thread.id);
@@ -38,15 +39,31 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
                 result = await readAcceptedProjection(bb.sdk.threads.events.list, id);
               }
               if (stale()) return;
-              store.commit(id, result);
-              bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, { threadId: id });
+              try {
+                for (let attempt = 0; ; attempt++) {
+                  try { store.commit(id, result); break; } catch (error) {
+                    const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+                    if (typeof code !== "string" || !code.startsWith("SQLITE_BUSY") || attempt === 3) throw error;
+                    await delay([1000, 5000, 15000][attempt]!, signal);
+                    if (stale()) return;
+                  }
+                }
+              } catch (error) {
+                const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+                try { store.commit(id, { state: "error", reason: typeof code === "string" && code.startsWith("SQLITE_BUSY") ? "transient" : "unknown" }); }
+                catch {
+                  storageFailed = true;
+                  try { store.fail(); } catch { /* status RPC failure is surfaced by the client */ }
+                }
+              }
+              if (!stale()) bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, { threadId: id });
             }
           }));
           const failed = workers.find((worker) => worker.status === "rejected");
           if (failed?.status === "rejected") throw failed.reason;
           if (stale()) return;
         }
-        store.finish();
+        if (storageFailed) store.fail(); else store.finish();
         bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, {});
       } catch (error) {
         if (!stale()) {

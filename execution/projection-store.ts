@@ -4,6 +4,7 @@ import { executionProjectionSchema, type ExecutionProjection } from "../shared/e
 
 export function createExecutionProjectionStore(bb: BbPluginApi) {
   const db = bb.storage.database();
+  let storageFailure = false;
   bb.storage.migrate(db, [`CREATE TABLE IF NOT EXISTS execution_projection (generation INTEGER NOT NULL, thread_id TEXT NOT NULL, state TEXT NOT NULL, reasoning_level TEXT, service_tier TEXT, accepted_id TEXT, accepted_seq INTEGER, request_id TEXT, request_seq INTEGER, PRIMARY KEY (generation, thread_id))`, `ALTER TABLE execution_projection ADD COLUMN error_reason TEXT`, `CREATE TABLE execution_job (id INTEGER PRIMARY KEY CHECK (id = 1), generation INTEGER NOT NULL, state TEXT NOT NULL)`, `CREATE TABLE execution_manifest (generation INTEGER NOT NULL, thread_id TEXT NOT NULL, archived INTEGER NOT NULL, state TEXT NOT NULL, PRIMARY KEY (generation, thread_id))`]);
   const store = {
     async reconcile(threadId: string) {
@@ -34,12 +35,13 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
       db.prepare("UPDATE execution_job SET state = CASE WHEN EXISTS (SELECT 1 FROM execution_manifest WHERE generation = 1 AND state != 'done') THEN 'error' ELSE 'done' END WHERE id = 1").run();
     },
     fail() {
+      storageFailure = true;
       db.prepare("INSERT INTO execution_job (id, generation, state) VALUES (1, 1, 'error') ON CONFLICT(id) DO UPDATE SET state = 'error'").run();
     },
     status() {
       const job = db.prepare("SELECT state FROM execution_job WHERE id = 1").get() as { state: 'running' | 'done' | 'error' } | undefined;
       const counts = db.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN state = 'done' THEN 1 ELSE 0 END) AS done, SUM(CASE WHEN state = 'error' THEN 1 ELSE 0 END) AS errors FROM execution_manifest WHERE generation = 1").get() as { total: number; done: number | null; errors: number | null };
-      return { state: job?.state ?? 'loading', total: counts.total, done: counts.done ?? 0, errors: counts.errors ?? 0 } as const;
+      return { state: storageFailure ? 'error' : job?.state ?? 'loading', total: counts.total, done: counts.done ?? 0, errors: counts.errors ?? 0 } as const;
     },
     read(threadIds: string[]): ExecutionProjection[] {
       const query = db.prepare("SELECT state, reasoning_level, service_tier FROM execution_projection WHERE generation = 1 AND thread_id = ?");

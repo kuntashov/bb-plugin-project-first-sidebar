@@ -1,6 +1,8 @@
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import { expect, it, vi } from "vitest";
 import plugin from "../server.js";
+import { createExecutionProjectionStore } from "./projection-store.js";
+import { registerCatalogueFill } from "./catalogue-fill.js";
 
 it("fills through the factory service into SQLite and RPC, with bounded active workers before archive", async () => {
   const threads = [...Array.from({ length: 6 }, (_, i) => makeThreadResponse({ id: `active${i}` })), makeThreadResponse({ id: "archive", archivedAt: 1 })];
@@ -45,6 +47,7 @@ it("rolls back result and checkpoint together when the checkpoint write fails", 
   const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: { threads: { list: async () => [makeThreadResponse({ id: "t" })], events: { list: async () => [] } } } });
   await plugin(bb);
   bb.storage.database().exec("CREATE TRIGGER reject_checkpoint BEFORE UPDATE ON execution_manifest BEGIN SELECT RAISE(ABORT, 'failure'); END");
+  bb.storage.database().exec("CREATE TRIGGER reject_job_error BEFORE UPDATE ON execution_job BEGIN SELECT RAISE(ABORT, 'failure'); END");
   const service = harness.behavior.runService("execution-catalogue");
   await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "error" }));
   expect(await harness.behavior.callRpc("getExecutionProjections", { threadIds: ["t"] })).toEqual({ projections: [{ threadId: "t", state: "loading" }] });
@@ -77,4 +80,26 @@ it("persists a terminal history error and reports the failed index without treat
   expect(await harness.behavior.callRpc("getExecutionProjections", { threadIds: ["t"] })).toEqual({ projections: [{ threadId: "t", state: "error" }] });
   expect(read).toHaveBeenCalledTimes(1);
   service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+});
+
+it("retries SQLite busy at 1, 5 and 15 seconds, then records the affected ID and continues the archive", async () => {
+  vi.useFakeTimers();
+  try {
+    const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: { threads: { list: async () => [makeThreadResponse({ id: "a" }), makeThreadResponse({ id: "z", archivedAt: 1 })], events: { list: async () => [] } } } });
+    const store = createExecutionProjectionStore(bb);
+    const commit = store.commit.bind(store);
+    const times: number[] = [];
+    vi.spyOn(store, "commit").mockImplementation((id, value) => {
+      if (id === "a" && value.state === "absent") { times.push(Date.now()); throw Object.assign(new Error("busy"), { code: "SQLITE_BUSY" }); }
+      return commit(id, value);
+    });
+    registerCatalogueFill(bb, store);
+    const service = harness.behavior.runService("execution-catalogue");
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(21000);
+    expect(times.map((time) => time - times[0]!)).toEqual([0, 1000, 6000, 21000]);
+    expect(store.read(["a", "z"])).toEqual([{ threadId: "a", state: "error" }, { threadId: "z", state: "absent" }]);
+    expect(store.status()).toEqual({ state: "error", total: 2, done: 1, errors: 1 });
+    service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+  } finally { vi.useRealTimers(); }
 });
