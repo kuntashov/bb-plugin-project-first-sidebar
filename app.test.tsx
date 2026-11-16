@@ -29,6 +29,7 @@ import {
   type PreferenceValues,
 } from "./shared/preferences.js";
 import { defaultFilterDocument } from "./shared/filters.js";
+import { defaultProjectSectionDocument } from "./shared/project-sections.js";
 
 const app = await loadPluginApp(() => import("./app"));
 const registration = app.threadLists[0];
@@ -184,6 +185,10 @@ const THREADS = [
   }),
 ];
 
+function emptyProjectSections() {
+  return { status: "success" as const, document: defaultProjectSectionDocument() };
+}
+
 function props(): PluginThreadListProps {
   return {
     activeThreadId: null,
@@ -213,6 +218,14 @@ function renderList(
       listFilters: () => ({
         status: "success" as const,
         document: defaultFilterDocument(),
+      }),
+      listProjectSections: () => emptyProjectSections(),
+      readProjectSectionMetadata: (input: unknown) => ({
+        status: "success" as const,
+        threads: ((input as { threadIds?: string[] } | null)?.threadIds ?? []).map((threadId) => ({
+          threadId,
+          metadata: {},
+        })),
       }),
       ...rpc,
     },
@@ -257,6 +270,7 @@ describe("project-first-sidebar plugin", () => {
           status: "success",
           document: defaultFilterDocument(),
         }),
+        listProjectSections: () => emptyProjectSections(),
       },
     });
     expect(screen.getByLabelText("Loading sidebar navigation")).not.toBeNull();
@@ -271,6 +285,7 @@ describe("project-first-sidebar plugin", () => {
     expect(rpcCalls.map((call) => call.method)).toEqual([
       "listPreferences",
       "listFilters",
+      "listProjectSections",
     ]);
     expect(sectionHeaders()).toEqual(["Pinned", "Later", "Review", "Threads"]);
     expect(threadIds()).toEqual([
