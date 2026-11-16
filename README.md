@@ -62,9 +62,9 @@ When there is no accepted input in the available history, the title has its ordi
 
 The index fills in the background for visible, nondeleted threads, including the archive, even when highlighting is off. In the plugin settings, **Execution index** shows the job type and state, processed and discovered counts, thread errors and the outcome. Counts can change as threads are added or removed. Use **Rebuild execution index** to start a rebuild; a request during an initial fill or rebuild joins the existing job shared by all windows. During recovery or synchronization the button may be disabled with a message to wait.
 
-The working index remains available and continues to receive updates during a rebuild. A successful rebuild replaces it; a failed rebuild keeps the working index and its progress can be retried. An error limited to the new index does not erase verified working data. If a live update cannot be verified, its old colour is not presented as current.
+The working index remains available and continues to receive updates during a rebuild. A successful rebuild replaces it; a failed rebuild keeps the working index and its progress can be retried. An error limited to the new index does not erase verified working data.
 
-Interrupted work resumes automatically, and after restart or reconnection the index checks for missed changes. Cached results are unverified until checked, so updates may take time; this is not an atomic snapshot across BB and the plugin. A history response can fail with HTTP **413** when even a single event exceeds the SDK response limit (approximately 8 MiB). The affected history is reported as an error, the full rebuild cannot succeed, and the working index remains in use. Rebuilding alone cannot make an oversized event readable.
+Interrupted work resumes automatically. When the plugin starts, cached results are unverified until checked. After reconnection, the index checks for missed changes in the background; updates may take time, and this is not an atomic snapshot across BB and the plugin. A history response can fail with HTTP **413** when even a single event exceeds the SDK response limit (approximately 8 MiB). The affected history is reported as an error, the full rebuild cannot succeed, and the working index remains in use. Rebuilding alone cannot make an oversized event readable.
 
 ## Develop
 
