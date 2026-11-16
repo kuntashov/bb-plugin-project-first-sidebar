@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef } from "react";
-import { useAtomValue, useSetAtom } from "jotai";
+import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useSetAtom, useStore } from "jotai";
 import type { SidebarThread } from "../model/sidebar-thread.js";
 import { NO_MACHINE_GROUP_KEY } from "../model/machine-thread-groups.js";
 import { buildPinnedSidebarState } from "../model/pinned-sidebar-threads.js";
@@ -21,8 +21,11 @@ import {
   sidebarCollapsedMachinesAtom,
   sidebarCollapsedThreadSectionsAtom,
   sidebarOrganizationModeAtom,
+  sidebarHiddenGroupsAtom,
+  sidebarThreadLifecyclesAtom,
 } from "../preferences/atoms.js";
 import { usePreferencesReady } from "../preferences/PreferencesSync.js";
+import { planThreadReveal } from "../reveal/reveal-plan.js";
 import { useExpandThreadAncestors } from "./useReadStatusGrouping.js";
 
 interface ThreadSidebarExpansionArgs {
@@ -208,6 +211,8 @@ export function stepSidebarThreadReveal(
 }
 
 interface ThreadRevealExpansionArgs {
+  /** Full placement project when hidden ancestors are absent from the rendered path. */
+  sidebarProjectId?: string;
   thread: SidebarThread;
   threadById: ReadonlyMap<string, SidebarThread>;
   effectivePinnedThreadIds: ReadonlySet<string>;
@@ -221,6 +226,7 @@ export function resolveThreadRevealExpansion({
   effectivePinnedThreadIds,
   organizationMode,
   personalProjectId,
+  sidebarProjectId,
 }: ThreadRevealExpansionArgs) {
   const threadIdsToExpand = new Set<string>();
   const environmentIdsToExpand = new Set<string>();
@@ -246,10 +252,18 @@ export function resolveThreadRevealExpansion({
   const expansion = getThreadSidebarExpansion({
     organizationMode,
     isPinned: effectivePinnedThreadIds.has(thread.id),
-    thread,
-    sidebarProjectId: resolveSidebarProjectId(thread, threadById),
+    thread: organizationMode === "chronological" && currentThread ? currentThread : thread,
+    sidebarProjectId: sidebarProjectId ?? resolveSidebarProjectId(thread, threadById),
     personalProjectId,
   });
+  if (!effectivePinnedThreadIds.has(thread.id) && organizationMode !== "machine") {
+    const root = currentThread ?? thread;
+    const containerId = organizationMode === "chronological"
+      ? CHRONOLOGICAL_CONTAINER_ID
+      : sidebarProjectId ?? resolveSidebarProjectId(thread, threadById);
+    const sectionKey = sectionKeyForThreadSection(containerId, root.sectionId);
+    if (sectionKey) expansion.sectionKey = sectionKey;
+  }
   return { threadIdsToExpand, environmentIdsToExpand, expansion };
 }
 
@@ -270,17 +284,7 @@ function useSidebarThreadRevealCore({
   preferencesReady,
   personalProjectId,
 }: SidebarThreadRevealInputs): void {
-  const organizationMode = useAtomValue(sidebarOrganizationModeAtom);
-  const expandThreadAncestors = useExpandThreadAncestors();
-  const setCollapsedEnvironmentIdList = useSetAtom(collapsedEnvironmentIdsAtom);
-  const setCollapsedProjectIdList = useSetAtom(collapsedProjectIdsAtom);
-  const setCollapsedMachineKeyList = useSetAtom(sidebarCollapsedMachinesAtom);
-  const setCollapsedSectionList = useSetAtom(
-    sidebarCollapsedThreadSectionsAtom,
-  );
-  const setCollapsedSidebarSectionIdList = useSetAtom(
-    collapsedSidebarSectionIdsAtom,
-  );
+  const expandPath = useExpandSidebarThreadPath();
   const threadById = useMemo(
     () => new Map(fullThreads.map((thread) => [thread.id, thread])),
     [fullThreads],
@@ -315,62 +319,73 @@ function useSidebarThreadRevealCore({
       if (!thread || thread.isHidden) {
         continue;
       }
-      const { threadIdsToExpand, environmentIdsToExpand, expansion } =
-        resolveThreadRevealExpansion({
-          thread,
-          threadById: visibleThreadById,
-          effectivePinnedThreadIds,
-          organizationMode,
-          personalProjectId,
-        });
-
-      expandThreadAncestors(
-        threadIdsToExpand,
-        threadId === step.navigationRevealId,
-      );
-      setCollapsedEnvironmentIdList((current) =>
-        removeCollapsedIds(current, environmentIdsToExpand),
-      );
-      if (expansion.machineKey) {
-        const machineKey = expansion.machineKey;
-        setCollapsedMachineKeyList((current) =>
-          removeCollapsedIds(current, new Set([machineKey])),
-        );
-      }
-      if (expansion.sectionKey) {
-        const sectionKey = expansion.sectionKey;
-        setCollapsedSectionList((current) =>
-          removeCollapsedIds(current, new Set([sectionKey])),
-        );
-      }
-      if (expansion.projectId) {
-        const projectId = expansion.projectId;
-        setCollapsedProjectIdList((current) =>
-          removeCollapsedIds(current, new Set([projectId])),
-        );
-      }
-      if (expansion.sidebarSectionId) {
-        const sidebarSectionId = expansion.sidebarSectionId;
-        setCollapsedSidebarSectionIdList((current) =>
-          removeCollapsedIds(current, new Set([sidebarSectionId])),
-        );
-      }
+      expandPath({
+        thread,
+        threadById: visibleThreadById,
+        effectivePinnedThreadIds,
+        personalProjectId,
+      }, threadId === step.navigationRevealId);
     }
   }, [
     selectedThreadId,
     threadsReady,
     preferencesReady,
     personalProjectId,
-    organizationMode,
     fullThreads,
     threadById,
     visibleThreadById,
     effectivePinnedThreadIds,
-    expandThreadAncestors,
-    setCollapsedEnvironmentIdList,
-    setCollapsedProjectIdList,
-    setCollapsedMachineKeyList,
-    setCollapsedSectionList,
-    setCollapsedSidebarSectionIdList,
+    expandPath,
   ]);
+}
+
+// Shared by automatic expansion and the explicit reveal command. Only the
+// caller decides whether visibility may change and whether focus should move.
+export function useExpandSidebarThreadPath() {
+  const store = useStore();
+  const expandThreadAncestors = useExpandThreadAncestors();
+  const setCollapsedEnvironmentIdList = useSetAtom(collapsedEnvironmentIdsAtom);
+  const setCollapsedProjectIdList = useSetAtom(collapsedProjectIdsAtom);
+  const setCollapsedMachineKeyList = useSetAtom(sidebarCollapsedMachinesAtom);
+  const setCollapsedSectionList = useSetAtom(
+    sidebarCollapsedThreadSectionsAtom,
+  );
+  const setCollapsedSidebarSectionIdList = useSetAtom(
+    collapsedSidebarSectionIdsAtom,
+  );
+
+  return useCallback((args: Omit<ThreadRevealExpansionArgs, "organizationMode">, fromNavigation = true) => {
+    const organizationMode = store.get(sidebarOrganizationModeAtom);
+    const { threadIdsToExpand, environmentIdsToExpand, expansion } =
+      resolveThreadRevealExpansion({ ...args, organizationMode });
+    const chain = [args.thread, ...Array.from(threadIdsToExpand)
+      .flatMap((id) => { const thread = args.threadById.get(id); return thread ? [thread] : []; })];
+    const placementChain = args.sidebarProjectId ? chain.map((thread, index) => index === chain.length - 1 ? { ...thread, projectId: args.sidebarProjectId! } : thread) : chain;
+    const plan = planThreadReveal(placementChain, {
+      organizationMode,
+      threadLifecycles: store.get(sidebarThreadLifecyclesAtom),
+      hiddenGroups: store.get(sidebarHiddenGroupsAtom),
+    }, args.personalProjectId);
+    if (plan.reasons.length) return;
+    expandThreadAncestors(threadIdsToExpand, fromNavigation);
+    setCollapsedEnvironmentIdList((ids) => removeCollapsedIds(ids, environmentIdsToExpand));
+    if (expansion.machineKey) {
+      const key = expansion.machineKey;
+      setCollapsedMachineKeyList((ids) => removeCollapsedIds(ids, new Set([key])));
+    }
+    if (expansion.sectionKey) {
+      const key = expansion.sectionKey;
+      setCollapsedSectionList((ids) => removeCollapsedIds(ids, new Set([key])));
+    }
+    if (expansion.projectId) {
+      const key = expansion.projectId;
+      setCollapsedProjectIdList((ids) => removeCollapsedIds(ids, new Set([key])));
+    }
+    if (expansion.sidebarSectionId) {
+      const key = expansion.sidebarSectionId;
+      setCollapsedSidebarSectionIdList((ids) => removeCollapsedIds(ids, new Set([key])));
+    }
+  }, [store, expandThreadAncestors, setCollapsedEnvironmentIdList,
+    setCollapsedMachineKeyList, setCollapsedSectionList, setCollapsedProjectIdList,
+    setCollapsedSidebarSectionIdList]);
 }

@@ -1,0 +1,11 @@
+[data-thread-quick-search] mark {
+  background: color-mix(in srgb, var(--sidebar-ring, #6688ee) 35%, transparent);
+  color: inherit;
+  border-radius: 2px;
+}
+[data-thread-quick-search] [role="option"][aria-selected="true"] {
+  background: var(--accent, #dce6f5);
+  color: var(--accent-foreground, inherit);
+  outline: 1px solid var(--ring, currentColor);
+  outline-offset: -1px;
+}

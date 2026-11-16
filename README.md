@@ -59,3 +59,7 @@ GitHub-hosted Actions run the same checks and upload a ready npm tarball. A `vX.
 ## Provenance and license
 
 Derived from BB's MIT-licensed Thread-list and shared UI. Original attribution is preserved in [LICENSE](LICENSE); extraction bases and local extensions are described in [UPSTREAM.md](UPSTREAM.md). This is a third-party plugin, not an official BB plugin.
+
+## Quick thread navigation
+
+The “Найти тред по фильтру” command opens a keyboard-driven filter → thread picker. Match literal title fragments separated by `/`, with highlighted matches. Alt+A includes the complete archive. Enter opens the thread, applies the project filter and focuses its sidebar row. [Usage and keyboard controls](docs/quick-thread-search.md).

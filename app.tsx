@@ -8,6 +8,8 @@ import { ProjectList } from "./app/list/ProjectList.js";
 import { ProjectFilterEditor } from "./app/filters/ProjectFilterEditor.js";
 import { ProjectFilterDialog } from "./app/filters/ProjectFilterDialog.js";
 import { useSidebarThreadReveal } from "./app/list/useSidebarThreadReveal.js";
+import { ThreadReveal, requestThreadReveal } from "./app/reveal/ThreadReveal.js";
+import { QuickThreadSearch, requestQuickThreadSearch } from "./app/search/QuickThreadSearch.js";
 import { moveThreadAction } from "./app/rows/moveThreadAction.js";
 
 function ThreadList({
@@ -29,11 +31,13 @@ function ThreadList({
     <CompactViewportOverrideProvider isCompactViewport={isCompactViewport}>
       <TooltipProvider>
         <PreferencesSync />
-        <ProjectList
-          activeThreadId={activeThreadId}
-          onProjectSelect={onNavigate}
-          onManageFilters={openFilterDialog}
-        />
+        <div data-project-first-sidebar="" className="contents">
+          <ProjectList
+            activeThreadId={activeThreadId}
+            onProjectSelect={onNavigate}
+            onManageFilters={openFilterDialog}
+          />
+        </div>
         <ProjectFilterDialog
           open={isFilterDialogOpen}
           onOpenChange={setIsFilterDialogOpen}
@@ -45,6 +49,24 @@ function ThreadList({
 }
 
 export default definePluginApp((app) => {
+  app.slots.experimental_appOverlay({ id: "quick-thread-search", component: QuickThreadSearch });
+  app.commands.register({ id: "quick-thread-search", title: "Найти тред по фильтру", run: requestQuickThreadSearch });
+  app.slots.experimental_appOverlay({ id: "thread-reveal", component: ThreadReveal });
+  app.commands.register({
+    id: "reveal-current-thread",
+    title: "Показать текущий тред в дереве",
+    defaultShortcut: { key: "l", mod: true, shift: true },
+    isAvailable: ({ threadId }) => threadId !== null,
+    run: ({ threadId }) => { if (threadId) requestThreadReveal(threadId); },
+  });
+  app.slots.experimental_threadAction({
+    id: "reveal-thread",
+    title: "Показать в дереве",
+    icon: "ListTree",
+    placement: "header",
+    group: "navigation",
+    item: ({ thread }) => ({ label: "Показать в дереве", icon: "ListTree", run: () => requestThreadReveal(thread.id) }),
+  });
   app.slots.settingsSection({
     id: "project-first-sidebar-import",
     title: "Thread-list preferences import",

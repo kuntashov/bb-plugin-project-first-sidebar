@@ -1,0 +1,5 @@
+[data-project-first-reveal-highlight] {
+  outline: 2px solid var(--sidebar-ring, currentColor);
+  outline-offset: -2px;
+  border-radius: 4px;
+}
