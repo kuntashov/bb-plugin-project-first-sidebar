@@ -12,4 +12,15 @@ describe("execution title appearance", () => {
     expect(appearance.color).toBeNull();
     expect(appearance.explanation).not.toBe("");
   });
+  it.each([
+    [null, "fast", "reasoning unknown; service tier fast", "purple"],
+    ["high", null, "reasoning high; service tier unknown", "orange"],
+    [null, null, "reasoning unknown; service tier unknown", null],
+  ] as const)("explains independently unknown dimensions", (reasoningLevel, serviceTier, values, color) => {
+    const appearance = executionAppearance({ threadId: "t", state: "ready", reasoningLevel, serviceTier });
+    expect(appearance.color).toBe(color);
+    expect(appearance.explanation).toContain(values);
+    expect(appearance.explanation).toContain("this thread's saved history");
+    expect(appearance.explanation).toContain("Updated when saved history is indexed");
+  });
 });

@@ -366,7 +366,7 @@ describe("ThreadRow", () => {
       store.set(executionProjectionsAtom, { [thread.id]: { threadId: thread.id, state: "ready", reasoningLevel: "high", serviceTier: "fast" } });
     });
     const slot = renderThreadRow({ thread });
-    const link = screen.getByRole("link", { name: /Open Thread; Last accepted request: reasoning high; service tier fast/ });
+    const link = screen.getByRole("link", { name: /Open Thread; Last accepted request in this thread's saved history: reasoning high; service tier fast/ });
     expect(link.getAttribute("href")).toBe(thread.href);
     const title = slot.container.querySelector(".bb-thread-title");
     expect(title?.className).toContain("text-red-700");
@@ -374,6 +374,69 @@ describe("ThreadRow", () => {
     act(() => store.set(executionProjectionsAtom, { [thread.id]: { threadId: thread.id, state: "error" } }));
     expect(title?.className).not.toContain("text-red-700");
     expect(screen.getByRole("link", { name: /could not be read/ })).toBeTruthy();
+    act(() => { store.set(executionProjectionsAtom, {}); store.set(sidebarShowExecutionHighlightingAtom, false); });
+  });
+  it("shows the complete resolved title and unknown execution values on keyboard focus", async () => {
+    const thread = createThread({
+      title: "Compare @thread:thr_mentioned in @project:proj_mentioned",
+      displayTitle: "Compare Mention target in Mention project",
+    });
+    const store = getDefaultStore();
+    act(() => {
+      store.set(sidebarShowExecutionHighlightingAtom, true);
+      store.set(executionProjectionsAtom, { [thread.id]: { threadId: thread.id, state: "ready", reasoningLevel: null, serviceTier: "fast" } });
+    });
+    const slot = renderThreadRow({ thread });
+    const link = screen.getByRole("link", { name: /Open Compare Mention target in Mention project/ });
+    fireEvent.keyDown(document, { key: "Tab" });
+    act(() => link.focus());
+    const tooltip = await screen.findByRole("tooltip");
+    expect(tooltip.textContent).toContain("Compare Mention target in Mention project");
+    expect(tooltip.textContent).toContain("reasoning unknown; service tier fast");
+    expect(tooltip.textContent).toContain("saved history is indexed");
+    expect(slot.container.querySelector(".bb-thread-title")?.className).toContain("text-purple-700");
+    expect(link.getAttribute("href")).toBe(thread.href);
+    act(() => { store.set(executionProjectionsAtom, {}); store.set(sidebarShowExecutionHighlightingAtom, false); });
+  });
+  it.each([
+    ["active", { status: "active", runtimeStatus: "active" }],
+    ["idle pinned", { status: "idle", pinnedAt: 1 }],
+    ["archived child", { archivedAt: 1, isArchived: true, parentThreadId: "thr_parent" }],
+  ] as const)("preserves row state and split navigation when highlighting %s", (_name, overrides) => {
+    const thread = createThread(overrides);
+    const store = getDefaultStore();
+    const slot = renderThreadRow({ thread, isActive: true, splitLayout: twoPaneLayout(thread.id) });
+    const link = screen.getByRole("link", { name: "Open Thread" });
+    const row = link.closest("[data-sidebar-rename-row]")!;
+    const rowClass = row.className;
+    const indicators = renderedIndicators();
+    act(() => {
+      store.set(executionProjectionsAtom, { [thread.id]: { threadId: thread.id, state: "ready", reasoningLevel: "high", serviceTier: "fast" } });
+      store.set(sidebarShowExecutionHighlightingAtom, true);
+    });
+    expect(row.className).toBe(rowClass);
+    expect(renderedIndicators()).toEqual(indicators);
+    expect(slot.container.querySelector(".bb-thread-title")?.className).toContain("text-red-700");
+    expect(fireEvent.click(link, { ctrlKey: true })).toBe(false);
+    expect(slot.inspection.navigateCalls).toEqual([{ method: "toThread", threadId: thread.id, options: { split: true } }]);
+    act(() => { store.set(executionProjectionsAtom, {}); store.set(sidebarShowExecutionHighlightingAtom, false); });
+  });
+  it("preserves drag activation and inline rename on a highlighted row", async () => {
+    const thread = createThread();
+    const store = getDefaultStore();
+    const onTouchStart = vi.fn();
+    act(() => {
+      store.set(sidebarShowExecutionHighlightingAtom, true);
+      store.set(executionProjectionsAtom, { [thread.id]: { threadId: thread.id, state: "ready", reasoningLevel: "high", serviceTier: "fast" } });
+    });
+    const slot = renderThreadRow({ thread, options: { ...DEFAULT_OPTIONS, dragBindings: {
+      attributes: { role: "button", tabIndex: 0, "aria-disabled": false, "aria-pressed": undefined, "aria-roledescription": "sortable", "aria-describedby": "thread-sortable" },
+      disabled: false, isDragging: false, listeners: { onTouchStart }, setActivatorNodeRef: vi.fn(),
+    } } });
+    fireEvent.touchStart(screen.getByRole("link", { name: /Open Thread/ }));
+    expect(onTouchStart).toHaveBeenCalledTimes(1);
+    fireEvent.doubleClick(slot.container.querySelector(".bb-thread-title")!);
+    expect(await screen.findByRole("textbox", { name: "Thread name" })).toHaveProperty("value", "Thread");
     act(() => { store.set(executionProjectionsAtom, {}); store.set(sidebarShowExecutionHighlightingAtom, false); });
   });
   it("shows the registered provider icon by default and keeps it visible during inline rename", async () => {
@@ -1483,7 +1546,7 @@ describe("ThreadRow", () => {
     await waitFor(() => {
       expect(screen.queryByRole("textbox", { name: "Thread name" })).toBeNull();
     });
-    expect(screen.getByText("Thread")).not.toBeNull();
+    expect(slot.container.querySelector(".bb-thread-title")?.textContent).toBe("Thread");
   });
 
   it("navigates instead of renaming when the title is double-tapped on a compact viewport", async () => {

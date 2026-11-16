@@ -684,39 +684,46 @@ function ThreadRowComponent({
         )}
         style={getHoverActionsInsetStyle(quickActions.length)}
       >
-        <a
-          ref={rowLinkRef}
-          href={thread.href}
-          draggable={false}
-          data-sidebar-thread-shortcut-target=""
-          data-sidebar-thread-id={thread.id}
-          data-sidebar-rename-anchor=""
-          onClick={(event) => {
-            if (isEditing) {
-              event.preventDefault();
-              event.stopPropagation();
-              return;
-            }
-            if (splitAvailable && (event.metaKey || event.ctrlKey)) {
-              event.preventDefault();
-              openInSplit();
-              return;
-            }
-            if (
-              consumeSidebarTitleDoubleClick(thread.id) &&
-              startEditingFromDoubleClick()
-            ) {
-              event.preventDefault();
-              event.stopPropagation();
-              return;
-            }
-            onProjectSelect?.();
-          }}
-          onDoubleClick={isEditing ? undefined : startTitleEditing}
-          aria-label={linkLabel}
-          aria-keyshortcuts={shortcut?.ariaKeyshortcuts}
-          className="absolute inset-0 rounded-md outline-none"
-        />
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <a
+              ref={rowLinkRef}
+              href={thread.href}
+              draggable={false}
+              data-sidebar-thread-shortcut-target=""
+              data-sidebar-thread-id={thread.id}
+              data-sidebar-rename-anchor=""
+              onClick={(event) => {
+                if (isEditing) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  return;
+                }
+                if (splitAvailable && (event.metaKey || event.ctrlKey)) {
+                  event.preventDefault();
+                  openInSplit();
+                  return;
+                }
+                if (
+                  consumeSidebarTitleDoubleClick(thread.id) &&
+                  startEditingFromDoubleClick()
+                ) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  return;
+                }
+                onProjectSelect?.();
+              }}
+              onDoubleClick={isEditing ? undefined : startTitleEditing}
+              aria-label={linkLabel}
+              aria-keyshortcuts={shortcut?.ariaKeyshortcuts}
+              className="absolute inset-0 rounded-md outline-none"
+            />
+          </TooltipTrigger>
+          <TooltipContent side="top">
+            {execution ? `${labelTitle} — ${execution.explanation}` : labelTitle}
+          </TooltipContent>
+        </Tooltip>
         <span
           ref={disclosureActions.titleRef}
           className={cn(

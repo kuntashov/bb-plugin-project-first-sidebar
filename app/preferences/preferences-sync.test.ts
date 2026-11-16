@@ -163,6 +163,22 @@ describe("preferences sync", () => {
     expect(store.get(sortAtom)).toBe("updated");
   });
 
+  it("synchronizes and restores the execution highlighting opt-in", async () => {
+    const rpc = fakeRpc();
+    const store = getDefaultStore();
+    const highlighting = createSyncedPreferenceAtom("showExecutionHighlighting");
+    await hydratePreferences(rpc);
+    expect(store.get(highlighting)).toBe(false);
+    store.set(highlighting, true);
+    vi.advanceTimersByTime(200);
+    await flushPreferenceWritesForTest();
+    expect(rpc.calls).toContainEqual({ method: "setPreference", input: { key: "showExecutionHighlighting", value: true } });
+    applyRemotePreferenceSignal({ key: "showExecutionHighlighting", value: false });
+    expect(store.get(highlighting)).toBe(false);
+    await hydratePreferences(fakeRpc({ showExecutionHighlighting: true }));
+    expect(store.get(highlighting)).toBe(true);
+  });
+
   it.each([false, true])(
     "preserves a completed local write during remount hydration (pending before read: %s)",
     async (writeBeforeRead) => {
