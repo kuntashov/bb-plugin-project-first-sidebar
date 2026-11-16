@@ -1,6 +1,63 @@
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import { expect, it, vi } from "vitest";
 import plugin from "../server.js";
+import { createExecutionProjectionStore } from "./projection-store.js";
+
+it("creates the final schema and resumes an interrupted initial job", async () => {
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar" });
+  const store = createExecutionProjectionStore(bb);
+  store.prepareStartup();
+  store.beginManifest([{ id: "t", archivedAt: null }]);
+  store.commit("t", { state: "error", reason: "too_large" });
+  store.finish();
+  expect(bb.storage.database().prepare("SELECT initial_completed FROM execution_meta").get()).toEqual({ initial_completed: 0 });
+  const reloaded = await harness.lifecycle.reload(plugin);
+  expect(await reloaded.harness.behavior.callRpc("startExecutionRebuild", null)).toMatchObject({ kind: "initial", state: "running" });
+  expect(reloaded.bb.storage.database().prepare("SELECT generation FROM execution_job WHERE id = 1").get()).toEqual({ generation: 1 });
+  await reloaded.harness.lifecycle.dispose();
+});
+
+it("rechecks completed and pending IDs after an initial job is interrupted", async () => {
+  const threads = ["a", "b"].map((id) => makeThreadResponse({ id }));
+  const reads: string[] = [];
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: { threads: {
+    list: async () => threads,
+    events: { list: async ({ threadId }) => { reads.push(threadId); return []; } },
+  } } });
+  const store = createExecutionProjectionStore(bb);
+  store.prepareStartup();
+  store.beginManifest(threads);
+  store.commit("a", { state: "absent" });
+  expect(bb.storage.database().prepare("SELECT state FROM execution_job WHERE id = 1").get()).toEqual({ state: "running" });
+  const reloaded = await harness.lifecycle.reload(plugin);
+  expect(await reloaded.harness.behavior.callRpc("getExecutionProjections", { threadIds: ["a"] })).toEqual({ projections: [{ threadId: "a", state: "unverified" }] });
+  reloaded.harness.sdk.stub("subscribe", () => () => {});
+  const service = reloaded.harness.behavior.runService("execution-catalogue");
+  await vi.waitFor(async () => expect(await reloaded.harness.behavior.callRpc("getExecutionRebuildStatus", null)).toMatchObject({ kind: "initial", state: "done", total: 2, done: 2 }));
+  expect(reads.sort()).toEqual(["a", "b"]);
+  service.controller.abort(); await service.done; await reloaded.harness.lifecycle.dispose();
+});
+
+it("finishes failed recovery after a live repair drains the queue", async () => {
+  const thread = makeThreadResponse({ id: "t" });
+  let failing = false;
+  const callbacks = new Map<string, (event: never) => void>();
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: {
+    subscribe: ({ event, callback }) => { callbacks.set(event, callback as (event: never) => void); return () => callbacks.delete(event); },
+    threads: { list: async () => [thread], events: { list: async () => { if (failing) throw Object.assign(new Error("large"), { status: 413 }); return []; } } },
+  } });
+  await plugin(bb);
+  const service = harness.behavior.runService("execution-catalogue");
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "done" }));
+  failing = true;
+  callbacks.get("realtime:connection")!({ state: "connected", reconnected: true, reconnectDelayMs: null } as never);
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionRebuildStatus", null)).toMatchObject({ kind: "recovery", state: "error", errors: 1 }));
+  failing = false;
+  await harness.behavior.emitThreadEvent("experimental_thread.events", { thread, sequence: 1 });
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionRebuildStatus", null)).toMatchObject({ kind: "recovery", state: "done", errors: 0 }));
+  expect(bb.storage.database().prepare("SELECT active_generation FROM execution_meta").get()).toEqual({ active_generation: 1 });
+  service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+});
 
 it("starts a separate rebuild after a completed initial fill and a later live error", async () => {
   const threads = ["a", "b"].map((id) => makeThreadResponse({ id }));

@@ -117,7 +117,7 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
             running.delete(id); active--;
             if (!stale()) pump();
             if (!stale() && !scanRunning && !pending.size && !active) {
-              try { if (store.canFinishInitialRepair()) { store.finish(); publish(); } }
+              try { if (store.canFinishRepair()) { store.finish(); publish(); } }
               catch { /* the saved error remains available for retry */ }
             }
             wake?.();

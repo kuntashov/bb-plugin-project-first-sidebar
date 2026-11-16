@@ -7,7 +7,13 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
   let storageFailure = false;
   const failedIds = new Set<string>();
   const workingFailures = new Set<string>();
-  bb.storage.migrate(db, [`CREATE TABLE IF NOT EXISTS execution_projection (generation INTEGER NOT NULL, thread_id TEXT NOT NULL, state TEXT NOT NULL, reasoning_level TEXT, service_tier TEXT, accepted_id TEXT, accepted_seq INTEGER, request_id TEXT, request_seq INTEGER, PRIMARY KEY (generation, thread_id))`, `ALTER TABLE execution_projection ADD COLUMN error_reason TEXT`, `CREATE TABLE execution_job (id INTEGER PRIMARY KEY CHECK (id = 1), generation INTEGER NOT NULL, state TEXT NOT NULL)`, `CREATE TABLE execution_manifest (generation INTEGER NOT NULL, thread_id TEXT NOT NULL, archived INTEGER NOT NULL, state TEXT NOT NULL, PRIMARY KEY (generation, thread_id))`, `ALTER TABLE execution_job ADD COLUMN failure_scope TEXT`, `UPDATE execution_job SET failure_scope = 'catalogue' WHERE state = 'error'`, `ALTER TABLE execution_job ADD COLUMN kind TEXT NOT NULL DEFAULT 'initial'`, `CREATE TABLE execution_meta (id INTEGER PRIMARY KEY CHECK (id = 1), active_generation INTEGER NOT NULL)`, `INSERT INTO execution_meta VALUES (1, 1)`, `ALTER TABLE execution_job ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0`, `ALTER TABLE execution_meta ADD COLUMN initial_completed INTEGER NOT NULL DEFAULT 0`, `UPDATE execution_meta SET initial_completed = 1 WHERE EXISTS (SELECT 1 FROM execution_job)`]);
+  bb.storage.migrate(db, [
+    `CREATE TABLE execution_projection (generation INTEGER NOT NULL, thread_id TEXT NOT NULL, state TEXT NOT NULL, reasoning_level TEXT, service_tier TEXT, accepted_id TEXT, accepted_seq INTEGER, request_id TEXT, request_seq INTEGER, error_reason TEXT, PRIMARY KEY (generation, thread_id))`,
+    `CREATE TABLE execution_job (id INTEGER PRIMARY KEY CHECK (id = 1), generation INTEGER NOT NULL, state TEXT NOT NULL, failure_scope TEXT, kind TEXT NOT NULL DEFAULT 'initial', epoch INTEGER NOT NULL DEFAULT 0)`,
+    `CREATE TABLE execution_manifest (generation INTEGER NOT NULL, thread_id TEXT NOT NULL, archived INTEGER NOT NULL, state TEXT NOT NULL, PRIMARY KEY (generation, thread_id))`,
+    `CREATE TABLE execution_meta (id INTEGER PRIMARY KEY CHECK (id = 1), active_generation INTEGER NOT NULL, initial_completed INTEGER NOT NULL DEFAULT 0)`,
+    `INSERT INTO execution_meta (id, active_generation) VALUES (1, 1)`,
+  ]);
   const active = () => (db.prepare("SELECT active_generation FROM execution_meta WHERE id = 1").get() as { active_generation: number }).active_generation;
   const job = () => db.prepare("SELECT generation, state, kind, epoch FROM execution_job WHERE id = 1").get() as { generation: number; state: string; kind: string; epoch: number } | undefined;
   const target = () => job()?.generation ?? active();
@@ -52,8 +58,8 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
     },
     token() { return `${target()}:${job()?.epoch ?? 0}`; },
     kind() { return (job()?.kind ?? 'initial') as 'initial' | 'rebuild' | 'recovery'; },
-    canFinishInitialRepair() {
-      return !!db.prepare("SELECT 1 FROM execution_job WHERE id = 1 AND kind = 'initial' AND state = 'error' AND failure_scope IS NULL").get();
+    canFinishRepair() {
+      return !!db.prepare("SELECT 1 FROM execution_job WHERE id = 1 AND kind IN ('initial', 'recovery') AND state = 'error' AND failure_scope IS NULL").get();
     },
     tooLarge() {
       return (db.prepare("SELECT COUNT(*) AS count FROM execution_projection WHERE generation = ? AND state = 'error' AND error_reason = 'too_large'").get(target()) as { count: number }).count;
