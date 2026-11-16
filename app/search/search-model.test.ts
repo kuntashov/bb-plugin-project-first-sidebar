@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { entry } from "./test-fixtures.js";
 import { defaultFilterDocument } from "../../shared/filters.js";
-import { completeAncestors, effectiveProject, filterProjectIds, listSearchThreads, matchTitle } from "./search-model.js";
+import { completeAncestors, effectiveProject, filterProjectIds, listSearchThreads, matchThreadQuery, matchTitle } from "./search-model.js";
 
 
 describe("navigation by literal fragments", () => {
@@ -27,6 +27,38 @@ describe("navigation by literal fragments", () => {
     expect(matchTitle("İ😀ПУБ", "i/😀/пуб")).toEqual([{ start: 0, end: 6 }]);
     expect(matchTitle("ёлка", "елка")).toBeNull();
     expect(matchTitle("публикации", "публкации")).toBeNull();
+  });
+});
+
+describe("project prefix and keyboard layout", () => {
+  it.each(["cthdth", "сервер"])("finds and highlights Russian title from %s", (query) => {
+    expect(matchTitle("Наш сервер", query)).toEqual([{ start: 4, end: 10 }]);
+  });
+  it.each(["server", "ыукмук"])("finds and highlights English title from %s", (query) => {
+    expect(matchTitle("Our SERVER", query)).toEqual([{ start: 4, end: 10 }]);
+  });
+  it("allows independent layouts in AND fragments and highlights both interpretations", () => {
+    expect(matchTitle("Сервер server", "cthdth/ыукмук")).toEqual([{ start: 0, end: 6 }, { start: 7, end: 13 }]);
+    expect(matchTitle("сервер cthdth", "cthdth")).toEqual([{ start: 0, end: 6 }, { start: 7, end: 13 }]);
+    expect(matchTitle("сервер", " cthdth")).toBeNull();
+    expect(matchTitle("😀СЕРВЕР", "CTHDTH")).toEqual([{ start: 2, end: 8 }]);
+  });
+  it("requires project and every title fragment on their respective fields", () => {
+    expect(matchThreadQuery("Настройка сравнения", "Admin tools", "adm:на/сра")).toEqual({
+      titleRanges: [{ start: 0, end: 2 }, { start: 10, end: 13 }], projectRanges: [{ start: 0, end: 3 }],
+    });
+    expect(matchThreadQuery("Настройка сравнения adm", "Home", "adm:на/сра")).toBeNull();
+    expect(matchThreadQuery("Настройка", "Admin сравнения", "adm:на/сра")).toBeNull();
+    expect(matchThreadQuery("Настройка сравнения", "Admin", "фвь:на/сра")).not.toBeNull();
+  });
+  it("uses only the first colon, preserves spaces and permits empty sides", () => {
+    expect(matchThreadQuery("URL http:server", "Admin", "adm:http:server")).not.toBeNull();
+    expect(matchThreadQuery("Тред", "Admin", "adm:")).not.toBeNull();
+    expect(matchThreadQuery("Сервер", "Home", ":cthdth")).not.toBeNull();
+    expect(matchThreadQuery("Сервер", "Home", ":")).toEqual({ titleRanges: [], projectRanges: [] });
+    expect(matchThreadQuery("Сервер", "Admin", "adm :сервер")).toBeNull();
+    expect(matchThreadQuery("Сервер", "Admin", "adm: сервер")).toBeNull();
+    expect(matchThreadQuery("Admin", "Home", "adm")).toEqual({ titleRanges: [{ start: 0, end: 3 }], projectRanges: [] });
   });
 });
 

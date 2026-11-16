@@ -14,6 +14,19 @@ export function rawTitle(thread: SearchThread): string {
   return `Thread ${thread.id.slice(0, 8)}`;
 }
 
+// Standard Russian/US key positions; delimiters are parsed before layout alternatives.
+const englishKeys = "`qwertyuiop[]asdfghjkl;'zxcvbnm,.";
+const russianKeys = "ёйцукенгшщзхъфывапролджэячсмитьбю";
+const otherLayout = new Map<string, string>();
+for (let index = 0; index < englishKeys.length; index++) {
+  otherLayout.set(englishKeys[index], russianKeys[index]);
+  otherLayout.set(russianKeys[index], englishKeys[index]);
+}
+function queryAlternatives(part: string): string[] {
+  const lower = part.toLowerCase();
+  return [...new Set([lower, [...lower].map((point) => otherLayout.get(point) ?? point).join("")])];
+}
+
 // Map folded offsets back to entire original code points (İ and emoji included).
 export function matchTitle(title: string, query: string): MatchRange[] | null {
   let folded = "";
@@ -30,11 +43,12 @@ export function matchTitle(title: string, query: string): MatchRange[] | null {
   folded = title.toLowerCase();
   const ranges: MatchRange[] = [];
   for (const part of query.split("/").filter((part) => part.length !== 0)) {
-    const term = part.toLowerCase();
     let found = false;
-    for (let at = folded.indexOf(term); at !== -1; at = folded.indexOf(term, at + 1)) {
-      found = true;
-      ranges.push({ start: starts[at], end: ends[at + term.length - 1] });
+    for (const term of queryAlternatives(part)) {
+      for (let at = folded.indexOf(term); at !== -1; at = folded.indexOf(term, at + 1)) {
+        found = true;
+        ranges.push({ start: starts[at], end: ends[at + term.length - 1] });
+      }
     }
     if (!found) return null;
   }
@@ -46,6 +60,14 @@ export function matchTitle(title: string, query: string): MatchRange[] | null {
     else merged.push({ ...range });
   }
   return merged;
+}
+
+export function matchThreadQuery(title: string, projectName: string, query: string): { titleRanges: MatchRange[]; projectRanges: MatchRange[] } | null {
+  const colon = query.indexOf(":");
+  const projectRanges = colon < 0 ? [] : matchTitle(projectName, query.slice(0, colon));
+  if (projectRanges === null) return null;
+  const titleRanges = matchTitle(title, colon < 0 ? query : query.slice(colon + 1));
+  return titleRanges === null ? null : { titleRanges, projectRanges };
 }
 
 export function filterProjectIds(filterId: string, document: FilterDocumentV1, projects: readonly SearchProject[]): Set<string> {
