@@ -11,7 +11,7 @@ import { makePluginProject, makeSidebarThread } from "../model/fixtures.js";
 import { defaultPreferences } from "../../shared/preferences.js";
 import { defaultFilterDocument } from "../../shared/filters.js";
 import { windowFilterStore } from "../filters/filter-store.js";
-import { resetPreferencesSyncForTest, setPreferencesMirrorStorageForTest } from "../preferences/preferences-sync.js";
+import { flushPreferenceWritesForTest, resetPreferencesSyncForTest, setPreferencesMirrorStorageForTest } from "../preferences/preferences-sync.js";
 
 let restoreSidebarHook: (() => void) | null = null;
 const app = await loadPluginApp(() => import("../../app.js"));
@@ -253,6 +253,42 @@ describe("keyboard quick navigation", () => {
     await waitFor(() => expect(document.activeElement?.getAttribute("data-sidebar-thread-id")).toBe("current"));
     expect(document.activeElement?.closest("[data-project-section-id]")?.getAttribute("data-project-section-id")).toBe("alpha");
     expect(document.querySelector('[data-project-section-id="beta"]')?.getAttribute("data-project-section-collapsed")).toBe("true");
+  });
+  it("re-reads ancestry if a thread moves while project-section metadata is loading", async () => {
+    let release!: () => void;
+    const metadataReady = new Promise<void>((resolve) => { release = resolve; });
+    const p = entry({ id: "p", title: "P", updatedAt: 1 });
+    const q = entry({ id: "q", title: "Q", updatedAt: 1 });
+    const target = { ...current, parentThreadId: "p" };
+    const pRow = makeSidebarThread({ id: "p", projectId: "app", title: "P" });
+    const qRow = makeSidebarThread({ id: "q", projectId: "app", title: "Q" });
+    const targetRow = makeSidebarThread({ id: "current", projectId: "app", title: current.title, parentThreadId: "p" });
+    let state: PluginSidebarThreadsState = { status: "ready", projects: [makePluginProject({ id: "app", name: "App" })], sections: [], threads: [pRow, qRow, targetRow], experimental_archived: null };
+    type SidebarHook = typeof import("@get-bb/plugin-sdk/app").experimental_useSidebarThreads;
+    const runtime: { experimental_useSidebarThreads: SidebarHook } = Reflect.get(Reflect.get(globalThis, "__bbPluginRuntime"), "pluginSdkApp");
+    const originalHook = runtime.experimental_useSidebarThreads;
+    runtime.experimental_useSidebarThreads = (...args) => { originalHook(...args); return state; };
+    restoreSidebarHook = () => { runtime.experimental_useSidebarThreads = originalHook; };
+    const { view, refreshSidebar } = await mount({
+      rpc: {
+        listPreferences: () => ({ preferences: { ...defaultPreferences(), collapsedThreads: ["p", "q"] } }),
+        readProjectSectionMetadata: async (input: unknown) => { await metadataReady; return { status: "success", threads: (input as { threadIds: string[] }).threadIds.map((threadId) => ({ threadId, metadata: {} })) }; },
+      },
+      sdk: { subscribe: () => () => {}, projects: { list: async () => [project] }, threads: {
+        list: async ({ offset } = {}) => offset ? [] : [target, p, q], get: async ({ threadId }) => makeThreadResponse(threadId === "p" ? p : target),
+      } },
+    });
+    const input = await chooseFilter(); fireEvent.change(input, { target: { value: "исс" } }); fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(view.inspection.navigateCalls).toContainEqual({ method: "toThread", threadId: "current" }));
+    // Keep metadata pending across at least one placement polling interval.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 60)); });
+    act(() => { state = { ...state, threads: [pRow, qRow, { ...targetRow, parentThreadId: "q" }] }; refreshSidebar(); });
+    await act(async () => release());
+    await waitFor(() => expect(document.activeElement?.getAttribute("data-sidebar-thread-id")).toBe("current"));
+    await flushPreferenceWritesForTest();
+    const collapseWrites = view.inspection.rpcCalls.filter((call) => call.method === "setPreference" && call.input !== null && typeof call.input === "object" && "key" in call.input && call.input.key === "collapsedThreads");
+    expect(collapseWrites.at(-1)?.input).toEqual({ key: "collapsedThreads", value: ["p"] });
+    expect(screen.getByRole("button", { name: "Collapse Q threads" })).toBeTruthy();
   });
   it("refreshes complete metadata on relevant realtime changes, not every streaming delta", async () => {
     let change: (changes: "thread-created"[] | "events-appended"[]) => void = () => {};
