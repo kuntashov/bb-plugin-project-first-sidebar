@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { useAtom, useAtomValue, useSetAtom } from "jotai";
+import { executionIndexErrorAtom } from "../execution/ExecutionProjectionSync.js";
 import { Icon } from "@/components/ui/icon";
 import {
   DropdownMenuGroup,
@@ -135,6 +136,7 @@ export function SidebarHeaderMenuContents({
 }
 
 function SidebarViewItems({ page }: { page: SidebarViewPage }) {
+  const indexError = useAtomValue(executionIndexErrorAtom);
   const [lifecycles, setLifecycles] = useAtom(sidebarThreadLifecyclesAtom);
   const [organization, setOrganization] = useAtom(sidebarOrganizationModeAtom);
   const [sort, setSort] = useAtom(sidebarChronologicalSortAtom);
@@ -256,6 +258,7 @@ function SidebarViewItems({ page }: { page: SidebarViewPage }) {
             Execution highlighting
             <span className="ml-auto inline-flex size-4 shrink-0 items-center justify-center">{showExecutionHighlighting && <Icon name="Check" className="size-4" />}</span>
           </DropdownMenuItem>
+          {indexError && <DropdownMenuLabel>Execution index could not be completed</DropdownMenuLabel>}
         </DropdownMenuGroup>
       </>
     );

@@ -206,6 +206,7 @@ function renderList(
       threads: THREADS,
     },
     rpc: {
+      getExecutionIndexStatus: () => ({ state: "done", total: 0, done: 0, errors: 0 }),
       listPreferences: () => ({
         preferences: { ...defaultPreferences(), ...preferences },
       }),
@@ -270,6 +271,7 @@ describe("project-first-sidebar plugin", () => {
     await screen.findByText("Pinned thread");
     expect(rpcCalls.map((call) => call.method)).toEqual([
       "listPreferences",
+      "getExecutionIndexStatus",
       "listFilters",
     ]);
     expect(sectionHeaders()).toEqual(["Pinned", "Later", "Review", "Threads"]);

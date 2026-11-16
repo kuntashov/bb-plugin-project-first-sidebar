@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export const EXECUTION_CHANGED_CHANNEL = "execution-projection-changed";
+
 export const executionProjectionSchema = z.discriminatedUnion("state", [
   z.object({ threadId: z.string().min(1), state: z.literal("loading") }).strict(),
   z.object({ threadId: z.string().min(1), state: z.literal("unverified") }).strict(),
@@ -13,5 +15,5 @@ export function executionAppearance(projection: ExecutionProjection): { color: "
   if (projection.state !== "ready") return { color: null, explanation: ({ loading: "Execution configuration is loading", unverified: "Execution configuration has not been verified", error: "Execution configuration could not be read", absent: "No accepted execution configuration" })[projection.state] };
   const high = ["high", "xhigh", "ultracode", "max", "ultra"].includes(projection.reasoningLevel ?? "");
   const fast = projection.serviceTier === "fast";
-  return { color: high ? (fast ? "red" : "orange") : fast ? "purple" : null, explanation: `Last accepted request: reasoning ${projection.reasoningLevel ?? "unknown"}; service tier ${projection.serviceTier ?? "unknown"}. Updates when a request is accepted.` };
+  return { color: high ? (fast ? "red" : "orange") : fast ? "purple" : null, explanation: `Last accepted request: reasoning ${projection.reasoningLevel ?? "unknown"}; service tier ${projection.serviceTier ?? "unknown"} (as last indexed).` };
 }
