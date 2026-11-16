@@ -16,7 +16,7 @@ function transient(error: unknown): boolean {
   if (typeof error !== "object" || error === null) return false;
   const e = error as { code?: unknown; status?: unknown; name?: unknown; cause?: { code?: unknown } };
   return (typeof e.code === "string" && (e.code.startsWith("SQLITE_BUSY") || ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN"].includes(e.code))) ||
-    (typeof e.cause?.code === "string" && ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN"].includes(e.cause.code)) ||
+    (typeof e.cause?.code === "string" && (e.cause.code.startsWith("SQLITE_BUSY") || ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN"].includes(e.cause.code))) ||
     e.name === "BbRequestTimeoutError" || (typeof e.status === "number" && [408, 429, 502, 503, 504].includes(e.status));
 }
 
@@ -52,9 +52,10 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
         pending.add(id);
         pump();
       };
-      const retry = async <T>(operation: () => Promise<T>): Promise<T> => {
+      const retry = async <T>(operation: () => Promise<T>, onFailure?: () => void): Promise<T> => {
         for (let attempt = 0; ; attempt++) {
           try { return await operation(); } catch (error) {
+            if (!stale()) onFailure?.();
             if (attempt === 3 || !transient(error) || stale()) throw error;
             await delay([1000, 5000, 15000][attempt]!, signal);
             if (stale()) throw error;
@@ -67,33 +68,44 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
         const force = fullRead.delete(id);
         const liveChange = live.delete(id);
         const valid = () => !stale() && token === store.token() && revision === (revisions.get(id) ?? 0);
+        const recordFailure = () => {
+          if (!valid()) return;
+          try { store.commit(id, { state: "error", reason: "transient" }, liveChange); }
+          catch { store.markFailed(id, liveChange); }
+          publish(id);
+        };
         try {
           if (membership.has(id)) {
-            const rows = await retry(() => bb.sdk.threads.list({ threadIds: [id], includeHidden: false }));
+            const rows = await retry(() => bb.sdk.threads.list({ threadIds: [id], includeHidden: false }), recordFailure);
             if (!valid()) return;
             const thread = rows.find((row) => row.id === id);
             if (!thread) {
-              await retry(async () => { if (valid()) store.remove(id); });
+              await retry(async () => { if (valid()) store.remove(id); }, recordFailure);
               if (valid()) { membership.delete(id); publish(id); }
               return;
             }
-            await retry(async () => { if (valid()) store.add(thread); });
+            await retry(async () => { if (valid()) store.add(thread); }, recordFailure);
             if (!valid()) return;
             membership.delete(id);
           }
           if (!store.contains(id)) return;
           const previous = force ? undefined : store.verified(id);
-          let result = await readAcceptedProjection(bb.sdk.threads.events.list, id, previous);
+          const listHistory: typeof bb.sdk.threads.events.list = (args) => {
+            if (!valid()) return Promise.reject(new Error("Execution read superseded"));
+            return bb.sdk.threads.events.list(args);
+          };
+          let result = await readAcceptedProjection(listHistory, id, previous);
           for (const ms of [1000, 5000, 15000]) {
             if (result.state !== "error" || result.reason !== "transient" || !valid()) break;
+            recordFailure();
             await delay(ms, signal);
             if (!valid()) return;
-            result = await readAcceptedProjection(bb.sdk.threads.events.list, id, previous);
+            result = await readAcceptedProjection(listHistory, id, previous);
           }
           if (!valid()) return;
           const before = store.read([id])[0];
           const statusBefore = store.status();
-          await retry(async () => { if (valid()) store.commit(id, result, liveChange); });
+          await retry(async () => { if (valid()) store.commit(id, result, liveChange); }, recordFailure);
           if (!valid()) return;
           if (JSON.stringify(before) !== JSON.stringify(store.read([id])[0])) publish(id);
           else if (store.status().state === 'running' || JSON.stringify(statusBefore) !== JSON.stringify(store.status())) bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, { progress: true });

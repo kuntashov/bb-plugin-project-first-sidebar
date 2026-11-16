@@ -28,8 +28,10 @@ it("rechecks completed and pending IDs after an initial job is interrupted", asy
   store.prepareStartup();
   store.beginManifest(threads);
   store.commit("a", { state: "absent" });
+  bb.storage.database().prepare("UPDATE execution_manifest SET state = 'running' WHERE thread_id = ?").run("b");
   expect(bb.storage.database().prepare("SELECT state FROM execution_job WHERE id = 1").get()).toEqual({ state: "running" });
   const reloaded = await harness.lifecycle.reload(plugin);
+  expect(reloaded.bb.storage.database().prepare("SELECT state FROM execution_manifest WHERE thread_id = ?").get("b")).toEqual({ state: "pending" });
   expect(await reloaded.harness.behavior.callRpc("getExecutionProjections", { threadIds: ["a"] })).toEqual({ projections: [{ threadId: "a", state: "unverified" }] });
   reloaded.harness.sdk.stub("subscribe", () => () => {});
   const service = reloaded.harness.behavior.runService("execution-catalogue");
@@ -149,6 +151,36 @@ it("joins concurrent rebuild requests and retains the working projection on a te
   await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionRebuildStatus", null)).toMatchObject({ kind: "rebuild", state: "error", errors: 1, tooLarge: 1 }));
   expect(await harness.behavior.callRpc("getExecutionProjections", { threadIds: ["t"] })).toMatchObject({ projections: [{ state: "ready", reasoningLevel: "high" }] });
   service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+});
+
+it("preserves the verified working colour during transient and terminal building failures", async () => {
+  vi.useFakeTimers();
+  try {
+    let failure: number | undefined;
+    const thread = makeThreadResponse({ id: "t" });
+    const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: { threads: {
+      list: async () => [thread], events: { list: async ({ types }) => {
+        if (failure) throw Object.assign(new Error("unavailable"), { status: failure });
+        return (types?.includes("turn/input/accepted") ? [{ id: "a", seq: 2, type: "turn/input/accepted", data: { clientRequestId: "r" } }] : [{ id: "q", seq: 1, type: "client/turn/requested", data: { requestId: "r", execution: { reasoningLevel: "high", serviceTier: "fast" } } }]) as never;
+      } },
+    } } });
+    await plugin(bb);
+    harness.sdk.stub("subscribe", () => () => {});
+    const service = harness.behavior.runService("execution-catalogue");
+    await vi.advanceTimersByTimeAsync(0);
+    failure = 503;
+    await harness.behavior.callRpc("startExecutionRebuild", null);
+    await vi.advanceTimersByTimeAsync(0);
+    const read = () => harness.behavior.callRpc("getExecutionProjections", { threadIds: ["t"] });
+    expect(await read()).toMatchObject({ projections: [{ state: "ready", reasoningLevel: "high", serviceTier: "fast" }] });
+    expect(bb.storage.database().prepare("SELECT state FROM execution_projection WHERE generation = 2 AND thread_id = 't'").get()).toEqual({ state: "error" });
+    failure = 413;
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await read()).toMatchObject({ projections: [{ state: "ready", reasoningLevel: "high", serviceTier: "fast" }] });
+    expect(await harness.behavior.callRpc("getExecutionRebuildStatus", null)).toMatchObject({ state: "error", tooLarge: 1 });
+    expect(bb.storage.database().prepare("SELECT active_generation FROM execution_meta").get()).toEqual({ active_generation: 1 });
+    service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+  } finally { vi.useRealTimers(); }
 });
 
 it("waits for a live change during rebuild and cuts over only after its newest result", async () => {

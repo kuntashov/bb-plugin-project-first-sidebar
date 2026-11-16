@@ -603,3 +603,76 @@ it("bounds transient catalogue retries and consumes one queued connected trigger
     service.controller.abort(); await service.done; await harness.lifecycle.dispose();
   } finally { vi.useRealTimers(); }
 });
+
+it("persists a live history error during backoff, exhausts retries, and repairs on a new event", async () => {
+  vi.useFakeTimers();
+  try {
+    const thread = makeThreadResponse({ id: "t" });
+    let fail = false;
+    const times: number[] = [];
+    const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: { threads: {
+      list: async () => [thread],
+      events: { list: async ({ types }) => { if (fail) { times.push(Date.now()); throw Object.assign(new Error("unavailable"), { status: 503 }); } return (types?.includes("turn/input/accepted") ? [{ id: "a", seq: 2, type: "turn/input/accepted", data: { clientRequestId: "r" } }] : [{ id: "q", seq: 1, type: "client/turn/requested", data: { requestId: "r", execution: { reasoningLevel: "high", serviceTier: "fast" } } }]) as never; } },
+    } } });
+    await plugin(bb);
+    harness.sdk.stub("subscribe", () => () => {});
+    const service = harness.behavior.runService("execution-catalogue");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await harness.behavior.callRpc("getExecutionProjections", { threadIds: ["t"] })).toMatchObject({ projections: [{ threadId: "t", state: "ready", reasoningLevel: "high", serviceTier: "fast" }] });
+    fail = true;
+    await harness.behavior.emitThreadEvent("experimental_thread.events", { thread, sequence: 1 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await harness.behavior.callRpc("getExecutionProjections", { threadIds: ["t"] })).toEqual({ projections: [{ threadId: "t", state: "error" }] });
+    expect(bb.storage.database().prepare("SELECT state FROM execution_manifest WHERE thread_id = ?").get("t")).toEqual({ state: "error" });
+    await vi.advanceTimersByTimeAsync(21000);
+    expect(times.map((time) => time - times[0]!)).toEqual([0, 1000, 6000, 21000]);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(times).toHaveLength(4);
+    fail = false;
+    await harness.behavior.emitThreadEvent("experimental_thread.events", { thread, sequence: 2 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await harness.behavior.callRpc("getExecutionProjections", { threadIds: ["t"] })).toMatchObject({ projections: [{ threadId: "t", state: "ready", reasoningLevel: "high", serviceTier: "fast" }] });
+    service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+  } finally { vi.useRealTimers(); }
+});
+
+it("cancels a pending history retry on disposal", async () => {
+  vi.useFakeTimers();
+  try {
+    const history = vi.fn(async () => { throw Object.assign(new Error("busy"), { status: 503 }); });
+    const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: { threads: {
+      list: async () => [makeThreadResponse({ id: "t" })], events: { list: history },
+    } } });
+    await plugin(bb);
+    harness.sdk.stub("subscribe", () => () => {});
+    const service = harness.behavior.runService("execution-catalogue");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(history).toHaveBeenCalledTimes(1);
+    service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(history).toHaveBeenCalledTimes(1);
+  } finally { vi.useRealTimers(); }
+});
+
+it.each(["too large", "malformed", "missing request"])("does not retry terminal history failure: %s", async (failure) => {
+  vi.useFakeTimers();
+  try {
+    const history = vi.fn(async ({ types }: { types?: readonly string[] }) => {
+      if (failure === "too large") throw Object.assign(new Error("large"), { status: 413 });
+      if (failure === "malformed") return [{}];
+      return types?.includes("turn/input/accepted") ? [{ id: "a", seq: 2, type: "turn/input/accepted", data: { clientRequestId: "r" } }] : [];
+    });
+    const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: { threads: {
+      list: async () => [makeThreadResponse({ id: "t" })], events: { list: history as never },
+    } } });
+    await plugin(bb); harness.sdk.stub("subscribe", () => () => {});
+    const service = harness.behavior.runService("execution-catalogue");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await harness.behavior.callRpc("getExecutionProjections", { threadIds: ["t"] })).toEqual({ projections: [{ threadId: "t", state: "error" }] });
+    const count = history.mock.calls.length;
+    expect(count).toBe(failure === "missing request" ? 2 : 1);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(history).toHaveBeenCalledTimes(count);
+    service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+  } finally { vi.useRealTimers(); }
+});

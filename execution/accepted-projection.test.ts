@@ -25,6 +25,7 @@ describe("accepted execution projection", () => {
   it.each([
     [{ status: 413, message: "sensitive content" }, "too_large"],
     [{ status: 503, message: "sensitive content" }, "transient"],
+    [{ code: "SQLITE_BUSY_SNAPSHOT", message: "sensitive content" }, "transient"],
     [Object.assign(new Error("sensitive content"), { name: "BbRequestTimeoutError" }), "transient"],
     [new Error("sensitive content"), "unknown"],
   ])("returns a safe reason for SDK failure %#", async (error, reason) => {

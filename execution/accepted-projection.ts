@@ -21,7 +21,7 @@ function sdkFailure(error: unknown): AcceptedProjection {
   if (typeof value.status === "number" && [408, 429, 502, 503, 504].includes(value.status)) return { state: "error", reason: "transient" };
   const cause = value.cause;
   const causeCode = typeof cause === "object" && cause !== null && "code" in cause ? cause.code : undefined;
-  if (value.name === "BbRequestTimeoutError" || (typeof value.code === "string" && ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN"].includes(value.code)) || (typeof causeCode === "string" && ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN"].includes(causeCode))) return { state: "error", reason: "transient" };
+  if (value.name === "BbRequestTimeoutError" || (typeof value.code === "string" && (value.code.startsWith("SQLITE_BUSY") || ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN"].includes(value.code))) || (typeof causeCode === "string" && (causeCode.startsWith("SQLITE_BUSY") || ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EAI_AGAIN"].includes(causeCode)))) return { state: "error", reason: "transient" };
   return { state: "error", reason: "unknown" };
 }
 

@@ -1,4 +1,4 @@
-import { createBBSdk } from "bb-app";
+import { BbRequestTimeoutError, createBBSdk } from "bb-app";
 import { expect, it } from "vitest";
 import { readAcceptedProjection } from "./accepted-projection.js";
 
@@ -16,4 +16,11 @@ it("uses the public SDK's history query and recognizes its HTTP 413 error withou
     ["turn/input/accepted", "desc", "1", null], ["client/turn/requested", "desc", "1", "10"],
   ]);
   expect(JSON.stringify(result)).not.toContain("sensitive example");
+});
+
+it("classifies public SDK HTTP and timeout errors without exposing response details", async () => {
+  const unavailable = createBBSdk({ baseUrl: "http://127.0.0.1:18888", fetch: async () => Response.json({ error: { code: "unavailable", message: "private" } }, { status: 503 }) });
+  expect(await readAcceptedProjection(unavailable.threads.events.list, "thread")).toEqual({ state: "error", reason: "transient" });
+  const timedOut = createBBSdk({ baseUrl: "http://127.0.0.1:18888", fetch: async () => { throw new BbRequestTimeoutError(1000); } });
+  expect(await readAcceptedProjection(timedOut.threads.events.list, "thread")).toEqual({ state: "error", reason: "transient" });
 });
