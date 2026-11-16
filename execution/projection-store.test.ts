@@ -28,3 +28,17 @@ it("projects the last accepted pair through the SDK and persists only its normal
   const stored = bb.storage.database().prepare("SELECT * FROM execution_projection").all();
   expect(JSON.stringify(stored)).not.toContain("private message");
 });
+
+it("retains only a safe error category for recovery and exposes a generic error to the client", async () => {
+  const secret = "sensitive example";
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: { threads: { events: { list: async () => { throw Object.assign(new Error(secret), { status: 413 }); } } } } });
+  await plugin(bb);
+  const result = await createExecutionProjectionStore(bb).reconcile("t");
+  expect(result).toEqual({ state: "error", reason: "too_large" });
+  const stored = bb.storage.database().prepare("SELECT * FROM execution_projection WHERE thread_id = ?").get("t");
+  expect(stored).toMatchObject({ state: "error", error_reason: "too_large" });
+  expect(JSON.stringify(stored)).not.toContain(secret);
+  const response = await harness.behavior.callRpc("getExecutionProjections", { threadIds: ["t"] });
+  expect(response).toEqual({ projections: [{ threadId: "t", state: "error" }] });
+  expect(JSON.stringify(response)).not.toContain(secret);
+});
