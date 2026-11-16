@@ -536,3 +536,70 @@ it("retains the error of an unknown ID across reload until catalogue reconciliat
   expect(await reloaded.harness.behavior.callRpc("getExecutionProjections", { threadIds: ["unknown"] })).toEqual({ projections: [{ threadId: "unknown", state: "error" }] });
   await reloaded.harness.lifecycle.dispose();
 });
+
+it("runs the connected reconciliation queued during a failed catalogue request", async () => {
+  let rejectFirst: ((error: Error) => void) | undefined;
+  const callbacks = new Map<string, (event: never) => void>();
+  const list = vi.fn(async () => {
+    if (list.mock.calls.length === 1) return new Promise<ReturnType<typeof makeThreadResponse>[]>((_resolve, reject) => { rejectFirst = reject; });
+    return [makeThreadResponse({ id: "new" })];
+  });
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: {
+    subscribe: ({ event, callback }) => { callbacks.set(event, callback as (event: never) => void); return () => callbacks.delete(event); },
+    threads: { list, events: { list: async () => [] } },
+  } });
+  await plugin(bb);
+  const service = harness.behavior.runService("execution-catalogue");
+  await vi.waitFor(() => expect(rejectFirst).toBeDefined());
+  callbacks.get("realtime:connection")!({ state: "connected", reconnected: false, reconnectDelayMs: null } as never);
+  rejectFirst!(new Error("terminal failure"));
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toEqual({ state: "done", total: 1, done: 1, errors: 0 }));
+  expect(list).toHaveBeenCalledTimes(2);
+  expect(await harness.behavior.callRpc("getExecutionProjections", { threadIds: ["new"] })).toEqual({ projections: [{ threadId: "new", state: "absent" }] });
+  service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+});
+
+it("drops a queued connected reconciliation after abort, even if the first request later fails", async () => {
+  let rejectFirst: ((error: Error) => void) | undefined;
+  const callbacks = new Map<string, (event: never) => void>();
+  const list = vi.fn(async () => new Promise<ReturnType<typeof makeThreadResponse>[]>((_resolve, reject) => { rejectFirst = reject; }));
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: {
+    subscribe: ({ event, callback }) => { callbacks.set(event, callback as (event: never) => void); return () => callbacks.delete(event); },
+    threads: { list, events: { list: async () => [] } },
+  } });
+  await plugin(bb);
+  const service = harness.behavior.runService("execution-catalogue");
+  await vi.waitFor(() => expect(rejectFirst).toBeDefined());
+  callbacks.get("realtime:connection")!({ state: "connected", reconnected: true, reconnectDelayMs: null } as never);
+  service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+  rejectFirst!(new Error("terminal failure"));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(list).toHaveBeenCalledTimes(1);
+  expect(harness.inspection.realtimeSignals).toHaveLength(0);
+});
+
+it("bounds transient catalogue retries and consumes one queued connected trigger", async () => {
+  vi.useFakeTimers();
+  try {
+    const callbacks = new Map<string, (event: never) => void>();
+    const times: number[] = [];
+    const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: {
+      subscribe: ({ event, callback }) => { callbacks.set(event, callback as (event: never) => void); return () => callbacks.delete(event); },
+      threads: { list: async () => {
+        times.push(Date.now());
+        if (times.length <= 4) throw Object.assign(new Error("busy"), { status: 503 });
+        return [makeThreadResponse({ id: "t" })];
+      }, events: { list: async () => [] } },
+    } });
+    await plugin(bb);
+    const service = harness.behavior.runService("execution-catalogue");
+    await vi.advanceTimersByTimeAsync(0);
+    callbacks.get("realtime:connection")!({ state: "connected", reconnected: false, reconnectDelayMs: null } as never);
+    await vi.advanceTimersByTimeAsync(21000);
+    expect(times.map((time) => time - times[0]!)).toEqual([0, 1000, 6000, 21000, 21000]);
+    expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toEqual({ state: "done", total: 1, done: 1, errors: 0 });
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(times).toHaveLength(5);
+    service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+  } finally { vi.useRealTimers(); }
+});

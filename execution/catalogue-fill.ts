@@ -163,7 +163,10 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
             publish();
             bb.log.error(`Execution catalogue fill failed: ${error instanceof Error ? error.name : "unknown error"}`);
           }
-        } finally { scanRunning = false; }
+        } finally {
+          scanRunning = false;
+          if (scanRequested && !stale()) void scan();
+        }
       };
       const unsubscribeConnection = bb.sdk.subscribe({ event: "realtime:connection", callback: (event) => {
         if (event.state === "connected") void scan();
