@@ -66,6 +66,7 @@ function missingRpc(method: keyof FilterRpcContract) {
 }
 
 const missingRpcHandlers: PluginRpcTestHandlers<FilterRpcContract> = {
+  getExecutionProjections: missingRpc("getExecutionProjections"),
   getImportStatus: missingRpc("getImportStatus"),
   importPreferences: missingRpc("importPreferences"),
   listPreferences: missingRpc("listPreferences"),

@@ -91,6 +91,9 @@ function definePreference<Schema extends z.ZodTypeAny>(
 }
 
 export const preferenceDefinitions = {
+  showExecutionHighlighting: definePreference(
+    z.boolean(), false, "Highlight titles by the last accepted execution configuration.", null,
+  ),
   showProviderIcons: definePreference(
     z.boolean(),
     true,

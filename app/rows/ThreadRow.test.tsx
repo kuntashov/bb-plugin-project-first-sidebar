@@ -35,7 +35,7 @@ import {
   makeSidebarEnvironment,
   makeSidebarThread,
 } from "../model/fixtures.js";
-import { sidebarShowProviderIconsAtom } from "../preferences/atoms.js";
+import { sidebarShowProviderIconsAtom, sidebarShowExecutionHighlightingAtom } from "../preferences/atoms.js";
 import type { ThreadRowOptions } from "./ThreadRow.js";
 import {
   preferenceValueAtom,
@@ -47,6 +47,7 @@ import {
 } from "../list/customizeRowActionsContext.js";
 
 installTestPluginRuntime();
+const { executionProjectionsAtom } = await import("../execution/ExecutionProjectionSync.js");
 const { SidebarDraftPresenceSync } =
   await import("../list/sidebarDraftPresence.js");
 const { ThreadRowNavigationProvider } =
@@ -335,6 +336,24 @@ afterEach(() => {
 });
 
 describe("ThreadRow", () => {
+  it("explains a verified execution colour while retaining the complete title and link", () => {
+    const thread = createThread();
+    const store = getDefaultStore();
+    act(() => {
+      store.set(sidebarShowExecutionHighlightingAtom, true);
+      store.set(executionProjectionsAtom, { [thread.id]: { threadId: thread.id, state: "ready", reasoningLevel: "high", serviceTier: "fast" } });
+    });
+    const slot = renderThreadRow({ thread });
+    const link = screen.getByRole("link", { name: /Open Thread; Last accepted request: reasoning high; service tier fast/ });
+    expect(link.getAttribute("href")).toBe(thread.href);
+    const title = slot.container.querySelector(".bb-thread-title");
+    expect(title?.className).toContain("text-red-700");
+    expect(title?.getAttribute("title")).toContain("Thread — Last accepted request");
+    act(() => store.set(executionProjectionsAtom, { [thread.id]: { threadId: thread.id, state: "error" } }));
+    expect(title?.className).not.toContain("text-red-700");
+    expect(screen.getByRole("link", { name: /could not be read/ })).toBeTruthy();
+    act(() => { store.set(executionProjectionsAtom, {}); store.set(sidebarShowExecutionHighlightingAtom, false); });
+  });
   it("shows the registered provider icon by default and keeps it visible during inline rename", async () => {
     const provider: PluginProvidersState["providers"][number] = {
       id: "provider-test",

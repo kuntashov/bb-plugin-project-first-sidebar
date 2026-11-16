@@ -25,6 +25,7 @@
     "app/**/*.ts",
     "app/**/*.tsx",
     "shared/**/*.ts",
+    "execution/**/*.ts",
     "vitest.config.ts",
     "components/**/*.ts",
     "components/**/*.tsx",

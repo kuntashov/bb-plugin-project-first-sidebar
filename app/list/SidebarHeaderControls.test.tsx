@@ -21,6 +21,7 @@ import {
   sidebarEnvironmentGroupingAtom,
   sidebarSortDirectionAtom,
   sidebarShowProviderIconsAtom,
+  sidebarShowExecutionHighlightingAtom,
 } from "../preferences/atoms.js";
 import type { OrganizationMode } from "../../shared/preferences.js";
 
@@ -256,6 +257,16 @@ describe("sidebar header controls", () => {
     expect(store.get(sidebarOrganizationModeAtom)).toBe("project");
     expect(store.get(sidebarEnvironmentGroupingAtom)).toBe(false);
     expect(screen.queryByRole("menuitem", { name: /^Reset/ })).toBeNull();
+  });
+
+  it("defaults execution highlighting off and toggles it in Rows", async () => {
+    const { store } = setup();
+    await openMenu();
+    await openSubmenu("Organize");
+    const toggle = await screen.findByRole("menuitemcheckbox", { name: "Execution highlighting" });
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    fireEvent.click(toggle);
+    expect(store.get(sidebarShowExecutionHighlightingAtom)).toBe(true);
   });
 
   it("toggles provider icons in the Organize Rows group", async () => {

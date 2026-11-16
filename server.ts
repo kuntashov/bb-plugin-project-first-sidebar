@@ -1,3 +1,6 @@
+import { createExecutionProjectionStore } from "./execution/projection-store.js";
+export { createExecutionProjectionStore } from "./execution/projection-store.js";
+import { executionProjectionSchema } from "./shared/execution-projection.js";
 import { filterIconSchema, displayModeSchema, type FilterIcon, type FilterDisplayMode } from "./shared/filter-icons.js";
 import {
   cliCommand,
@@ -62,6 +65,7 @@ const importResultSchema = z.object({
 export type ImportResult = z.infer<typeof importResultSchema>;
 
 export const projectFirstSidebarRpcContract = defineRpcContract({
+  getExecutionProjections: { input: z.object({ threadIds: z.array(z.string().min(1).max(1024)).max(500) }).strict(), output: z.object({ projections: z.array(executionProjectionSchema) }).strict() },
   getImportStatus: { input: z.null(), output: importResultSchema },
   importPreferences: { input: z.null(), output: importResultSchema },
   listPreferences: {
@@ -476,6 +480,8 @@ function requireFilterReadSuccess(result: FilterReadResult): FilterDocumentV1 {
 }
 
 export default async function projectFirstSidebarPlugin(bb: BbPluginApi) {
+  const projections = createExecutionProjectionStore(bb);
+  projections.markUnverified();
   const store = createPreferenceStore(bb);
   let writes: Promise<unknown> = Promise.resolve();
   function serialize<T>(operation: () => Promise<T>): Promise<T> {
@@ -493,6 +499,7 @@ export default async function projectFirstSidebarPlugin(bb: BbPluginApi) {
   }
 
   bb.rpc.register(projectFirstSidebarRpcContract, {
+    async getExecutionProjections({ threadIds }) { return { projections: projections.read(threadIds) }; },
     async getImportStatus() { return importStatus; },
     importPreferences,
     async listPreferences() {

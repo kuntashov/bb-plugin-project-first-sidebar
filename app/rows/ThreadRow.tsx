@@ -1,3 +1,5 @@
+import { executionProjectionsAtom } from "../execution/ExecutionProjectionSync.js";
+import { executionAppearance } from "../../shared/execution-projection.js";
 import {
   memo,
   useCallback,
@@ -64,6 +66,7 @@ import {
 import { useSidebarProjectName } from "../model/use-sidebar-data.js";
 import {
   sidebarShowProviderIconsAtom,
+  sidebarShowExecutionHighlightingAtom,
   threadRowActionsAtom,
 } from "../preferences/atoms.js";
 import { AppCommandShortcutPill } from "../ui/AppCommandShortcutPill.js";
@@ -441,6 +444,9 @@ function ThreadRowComponent({
     hasComposerDraft,
   );
   const labelTitle = thread.displayTitle;
+  const showExecutionHighlighting = useAtomValue(sidebarShowExecutionHighlightingAtom);
+  const projections = useAtomValue(executionProjectionsAtom);
+  const execution = showExecutionHighlighting ? executionAppearance(projections[thread.id] ?? { threadId: thread.id, state: "loading" }) : null;
   const crossProjectName = useSidebarProjectName(crossProjectId);
   const crossProjectLabel =
     crossProjectId === null
@@ -576,9 +582,10 @@ function ThreadRowComponent({
   const splitIndicatorLabel = trailingIndicatorResolution.accessibleLabel
     ? `${labelTitle} — open in split; ${trailingIndicatorResolution.accessibleLabel}`
     : `${labelTitle} — open in split`;
+  const executionLabel = execution ? `; ${execution.explanation}` : "";
   const linkLabel = hasComposerDraft
-    ? `Open ${labelTitle} (unsubmitted draft)`
-    : `Open ${labelTitle}`;
+    ? `Open ${labelTitle} (unsubmitted draft)${executionLabel}`
+    : `Open ${labelTitle}${executionLabel}`;
   const rowDragBindings =
     isEditing || isCustomizingActions ? undefined : options.dragBindings;
   const nestTargetState = options.nestDrop?.state ?? null;
@@ -753,9 +760,12 @@ function ThreadRowComponent({
             <span
               className={cn(
                 "bb-thread-title",
+                execution?.color === "red" && "text-red-700 dark:text-red-400",
+                execution?.color === "orange" && "text-orange-700 dark:text-orange-400",
+                execution?.color === "purple" && "text-purple-700 dark:text-purple-400",
                 crossProjectLabel !== null && "min-w-0 truncate",
               )}
-              title={labelTitle}
+              title={execution ? `${labelTitle} — ${execution.explanation}` : labelTitle}
               onDoubleClick={startTitleEditing}
             >
               <ThreadTitle threadId={thread.id} />

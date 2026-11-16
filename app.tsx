@@ -1,3 +1,4 @@
+import { ExecutionProjectionSync } from "./app/execution/ExecutionProjectionSync.js";
 import { useCallback, useRef, useState } from "react";
 import { definePluginApp, type PluginThreadListProps } from "@get-bb/plugin-sdk/app";
 import { CompactViewportOverrideProvider } from "@/components/ui/hooks/use-compact-viewport";
@@ -31,6 +32,7 @@ function ThreadList({
     <CompactViewportOverrideProvider isCompactViewport={isCompactViewport}>
       <TooltipProvider>
         <PreferencesSync />
+        <ExecutionProjectionSync />
         <div data-project-first-sidebar="" className="contents">
           <ProjectList
             activeThreadId={activeThreadId}
