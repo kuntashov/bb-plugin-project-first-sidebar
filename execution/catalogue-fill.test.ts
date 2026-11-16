@@ -532,7 +532,7 @@ it("retains the error of an unknown ID across reload until catalogue reconciliat
   callbacks.get("thread:changed")!({ entity: "thread", id: "unknown", changes: ["thread-created"] } as never);
   await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "error", errors: 1 }));
   const reloaded = await harness.lifecycle.reload(plugin);
-  expect(await reloaded.harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "error", errors: 1 });
+  expect(await reloaded.harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "running", errors: 1 });
   expect(await reloaded.harness.behavior.callRpc("getExecutionProjections", { threadIds: ["unknown"] })).toEqual({ projections: [{ threadId: "unknown", state: "error" }] });
   await reloaded.harness.lifecycle.dispose();
 });

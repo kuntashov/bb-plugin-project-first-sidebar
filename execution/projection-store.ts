@@ -7,14 +7,10 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
   let storageFailure = false;
   const failedIds = new Set<string>();
   const workingFailures = new Set<string>();
-  bb.storage.migrate(db, [`CREATE TABLE IF NOT EXISTS execution_projection (generation INTEGER NOT NULL, thread_id TEXT NOT NULL, state TEXT NOT NULL, reasoning_level TEXT, service_tier TEXT, accepted_id TEXT, accepted_seq INTEGER, request_id TEXT, request_seq INTEGER, PRIMARY KEY (generation, thread_id))`, `ALTER TABLE execution_projection ADD COLUMN error_reason TEXT`, `CREATE TABLE execution_job (id INTEGER PRIMARY KEY CHECK (id = 1), generation INTEGER NOT NULL, state TEXT NOT NULL)`, `CREATE TABLE execution_manifest (generation INTEGER NOT NULL, thread_id TEXT NOT NULL, archived INTEGER NOT NULL, state TEXT NOT NULL, PRIMARY KEY (generation, thread_id))`, `ALTER TABLE execution_job ADD COLUMN failure_scope TEXT`, `UPDATE execution_job SET failure_scope = 'catalogue' WHERE state = 'error'`, `ALTER TABLE execution_job ADD COLUMN kind TEXT NOT NULL DEFAULT 'initial'`, `CREATE TABLE execution_meta (id INTEGER PRIMARY KEY CHECK (id = 1), active_generation INTEGER NOT NULL)`, `INSERT INTO execution_meta VALUES (1, 1)`, `ALTER TABLE execution_job ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0`]);
+  bb.storage.migrate(db, [`CREATE TABLE IF NOT EXISTS execution_projection (generation INTEGER NOT NULL, thread_id TEXT NOT NULL, state TEXT NOT NULL, reasoning_level TEXT, service_tier TEXT, accepted_id TEXT, accepted_seq INTEGER, request_id TEXT, request_seq INTEGER, PRIMARY KEY (generation, thread_id))`, `ALTER TABLE execution_projection ADD COLUMN error_reason TEXT`, `CREATE TABLE execution_job (id INTEGER PRIMARY KEY CHECK (id = 1), generation INTEGER NOT NULL, state TEXT NOT NULL)`, `CREATE TABLE execution_manifest (generation INTEGER NOT NULL, thread_id TEXT NOT NULL, archived INTEGER NOT NULL, state TEXT NOT NULL, PRIMARY KEY (generation, thread_id))`, `ALTER TABLE execution_job ADD COLUMN failure_scope TEXT`, `UPDATE execution_job SET failure_scope = 'catalogue' WHERE state = 'error'`, `ALTER TABLE execution_job ADD COLUMN kind TEXT NOT NULL DEFAULT 'initial'`, `CREATE TABLE execution_meta (id INTEGER PRIMARY KEY CHECK (id = 1), active_generation INTEGER NOT NULL)`, `INSERT INTO execution_meta VALUES (1, 1)`, `ALTER TABLE execution_job ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0`, `ALTER TABLE execution_meta ADD COLUMN initial_completed INTEGER NOT NULL DEFAULT 0`, `UPDATE execution_meta SET initial_completed = 1 WHERE EXISTS (SELECT 1 FROM execution_job)`]);
   const active = () => (db.prepare("SELECT active_generation FROM execution_meta WHERE id = 1").get() as { active_generation: number }).active_generation;
   const job = () => db.prepare("SELECT generation, state, kind, epoch FROM execution_job WHERE id = 1").get() as { generation: number; state: string; kind: string; epoch: number } | undefined;
   const target = () => job()?.generation ?? active();
-  function refreshFinishedStatus(resolvedId: string) {
-    const remainingFailures = failedIds.size - (failedIds.has(resolvedId) ? 1 : 0);
-    db.prepare("UPDATE execution_job SET state = CASE WHEN ? > 0 OR EXISTS (SELECT 1 FROM execution_manifest WHERE generation = ? AND state != 'done') OR EXISTS (SELECT 1 FROM execution_projection WHERE generation = ? AND state = 'error') THEN 'error' ELSE 'done' END WHERE id = 1 AND state != 'running' AND kind != 'rebuild' AND failure_scope IS NULL").run(remainingFailures, target(), target());
-  }
   const store = {
     prepareStartup() {
       db.transaction(() => {
@@ -35,7 +31,8 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
       const started = db.transaction(() => {
         const current = job();
         if (!current || current.state === 'running') return false;
-        if ((current.kind === 'rebuild' || current.kind === 'initial') && current.state === 'error') {
+        const initialCompleted = (db.prepare("SELECT initial_completed FROM execution_meta WHERE id = 1").get() as { initial_completed: number }).initial_completed;
+        if ((current.kind === 'rebuild' || (current.kind === 'initial' && !initialCompleted)) && current.state === 'error') {
           db.prepare("UPDATE execution_job SET state = 'running', failure_scope = NULL WHERE id = 1").run();
         } else {
           const generation = active() + 1;
@@ -55,6 +52,9 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
     },
     token() { return `${target()}:${job()?.epoch ?? 0}`; },
     kind() { return (job()?.kind ?? 'initial') as 'initial' | 'rebuild' | 'recovery'; },
+    canFinishInitialRepair() {
+      return !!db.prepare("SELECT 1 FROM execution_job WHERE id = 1 AND kind = 'initial' AND state = 'error' AND failure_scope IS NULL").get();
+    },
     tooLarge() {
       return (db.prepare("SELECT COUNT(*) AS count FROM execution_projection WHERE generation = ? AND state = 'error' AND error_reason = 'too_large'").get(target()) as { count: number }).count;
     },
@@ -100,7 +100,6 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
       db.transaction(() => {
         db.prepare("DELETE FROM execution_projection WHERE generation IN (?, ?) AND thread_id = ?").run(active(), target(), threadId);
         db.prepare("DELETE FROM execution_manifest WHERE generation IN (?, ?) AND thread_id = ?").run(active(), target(), threadId);
-        refreshFinishedStatus(threadId);
       })();
       failedIds.delete(threadId);
       workingFailures.delete(threadId);
@@ -125,7 +124,6 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
         if (!rebuild || value.state !== "error" || live) store.put(threadId, value, active());
         if (rebuild) store.put(threadId, value, generation);
         db.prepare("UPDATE execution_manifest SET state = ? WHERE generation = ? AND thread_id = ?").run(value.state === 'error' ? 'error' : 'done', generation, threadId);
-        refreshFinishedStatus(threadId);
       })();
       failedIds.delete(threadId);
       workingFailures.delete(threadId);
@@ -135,6 +133,7 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
       db.transaction(() => {
         const generation = target();
         db.prepare("UPDATE execution_job SET state = CASE WHEN ? > 0 OR EXISTS (SELECT 1 FROM execution_manifest WHERE generation = ? AND state != 'done') OR EXISTS (SELECT 1 FROM execution_projection WHERE generation = ? AND state NOT IN ('ready', 'absent')) OR EXISTS (SELECT 1 FROM execution_manifest m LEFT JOIN execution_projection p ON p.generation = m.generation AND p.thread_id = m.thread_id WHERE m.generation = ? AND p.thread_id IS NULL) THEN 'error' ELSE 'done' END, failure_scope = NULL WHERE id = 1").run(failedIds.size, generation, generation, generation);
+        if (job()?.state === 'done' && job()?.kind === 'initial') db.prepare("UPDATE execution_meta SET initial_completed = 1 WHERE id = 1").run();
         if (job()?.state === 'done' && job()?.kind === 'rebuild') db.prepare("UPDATE execution_meta SET active_generation = ? WHERE id = 1").run(generation);
       })();
       storageFailure = false;
@@ -149,7 +148,7 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
       const errors = new Set(failedIds);
       const rows = db.prepare("SELECT thread_id FROM execution_manifest WHERE generation = ? AND state = 'error' UNION SELECT thread_id FROM execution_projection WHERE generation = ? AND state = 'error'").all(target(), target()) as { thread_id: string }[];
       for (const row of rows) errors.add(row.thread_id);
-      const state = storageFailure ? 'error' : !job ? 'loading' : job.state === 'running' ? 'running' : job.failure_scope === 'catalogue' || errors.size || counts.pending ? 'error' : 'done';
+      const state = storageFailure ? 'error' : !job ? 'loading' : job.state === 'running' ? 'running' : job.state === 'error' || job.failure_scope === 'catalogue' || errors.size || counts.pending ? 'error' : 'done';
       return { state, total: counts.total, done: counts.done ?? 0, errors: errors.size } as const;
     },
     read(threadIds: string[]): ExecutionProjection[] {

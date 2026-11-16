@@ -92,10 +92,11 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
           }
           if (!valid()) return;
           const before = store.read([id])[0];
+          const statusBefore = store.status();
           await retry(async () => { if (valid()) store.commit(id, result, liveChange); });
           if (!valid()) return;
           if (JSON.stringify(before) !== JSON.stringify(store.read([id])[0])) publish(id);
-          else if (store.status().state === 'running') bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, { progress: true });
+          else if (store.status().state === 'running' || JSON.stringify(statusBefore) !== JSON.stringify(store.status())) bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, { progress: true });
         } catch (error) {
           if (!valid()) return;
           try { store.commit(id, { state: "error", reason: transient(error) ? "transient" : "unknown" }, liveChange); }
@@ -115,6 +116,10 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
           void work(id).finally(() => {
             running.delete(id); active--;
             if (!stale()) pump();
+            if (!stale() && !scanRunning && !pending.size && !active) {
+              try { if (store.canFinishInitialRepair()) { store.finish(); publish(); } }
+              catch { /* the saved error remains available for retry */ }
+            }
             wake?.();
           });
         }

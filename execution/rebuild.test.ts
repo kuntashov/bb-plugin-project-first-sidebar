@@ -2,6 +2,56 @@ import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/tes
 import { expect, it, vi } from "vitest";
 import plugin from "../server.js";
 
+it("starts a separate rebuild after a completed initial fill and a later live error", async () => {
+  const threads = ["a", "b"].map((id) => makeThreadResponse({ id }));
+  const failing = new Set<string>();
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: { threads: {
+    list: async () => threads,
+    events: { list: async ({ threadId }) => { if (failing.has(threadId)) throw Object.assign(new Error("large"), { status: 413 }); return []; } },
+  } } });
+  await plugin(bb);
+  harness.sdk.stub("subscribe", () => () => {});
+  const service = harness.behavior.runService("execution-catalogue");
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "done" }));
+  failing.add("b");
+  await harness.behavior.emitThreadEvent("experimental_thread.events", { thread: threads[1]!, sequence: 1 });
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "error" }));
+  failing.add("a");
+  expect(await harness.behavior.callRpc("startExecutionRebuild", null)).toMatchObject({ kind: "rebuild", state: "running" });
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionRebuildStatus", null)).toMatchObject({ kind: "rebuild", state: "error", tooLarge: 2 }));
+  expect(await harness.behavior.callRpc("getExecutionProjections", { threadIds: ["a"] })).toEqual({ projections: [{ threadId: "a", state: "absent" }] });
+  service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+});
+
+it("does not report a failed rebuild as successful after a live repair without cutover", async () => {
+  const thread = makeThreadResponse({ id: "t" });
+  let failing = false;
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: { threads: {
+    list: async () => [thread],
+    events: { list: async () => { if (failing) throw Object.assign(new Error("large"), { status: 413 }); return []; } },
+  } } });
+  await plugin(bb);
+  harness.sdk.stub("subscribe", () => () => {});
+  const service = harness.behavior.runService("execution-catalogue");
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "done" }));
+  failing = true;
+  await harness.behavior.callRpc("startExecutionRebuild", null);
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionRebuildStatus", null)).toMatchObject({ kind: "rebuild", state: "error", errors: 1 }));
+  const beforeRepair = harness.inspection.realtimeSignals.length;
+  failing = false;
+  await harness.behavior.emitThreadEvent("experimental_thread.events", { thread, sequence: 2 });
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionRebuildStatus", null)).toMatchObject({ kind: "rebuild", state: "error", errors: 0 }));
+  expect(harness.inspection.realtimeSignals.slice(beforeRepair)).toContainEqual(expect.objectContaining({ payload: { progress: true } }));
+  expect(await Promise.all([harness.behavior.callRpc("getExecutionRebuildStatus", null), harness.behavior.callRpc("getExecutionRebuildStatus", null)])).toEqual([expect.objectContaining({ state: "error", errors: 0 }), expect.objectContaining({ state: "error", errors: 0 })]);
+  expect(bb.storage.database().prepare("SELECT active_generation FROM execution_meta").get()).toEqual({ active_generation: 1 });
+  expect(bb.storage.database().prepare("SELECT state, generation FROM execution_job WHERE id = 1").get()).toEqual({ state: "error", generation: 2 });
+  await harness.behavior.callRpc("startExecutionRebuild", null);
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionRebuildStatus", null)).toMatchObject({ kind: "rebuild", state: "done" }));
+  expect(bb.storage.database().prepare("SELECT active_generation FROM execution_meta").get()).toEqual({ active_generation: 2 });
+  expect(bb.storage.database().prepare("SELECT state, generation FROM execution_job WHERE id = 1").get()).toEqual({ state: "done", generation: 2 });
+  service.controller.abort(); await service.done; await harness.lifecycle.dispose();
+});
+
 it("joins initial fill from two windows without starting another catalogue scan", async () => {
   let release: (() => void) | undefined;
   const list = vi.fn(async () => [makeThreadResponse({ id: "t" })]);
