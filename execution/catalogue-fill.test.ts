@@ -68,11 +68,12 @@ it("does not commit or publish when disposed while a history read is pending", a
   harness.sdk.stub("subscribe", () => () => {});
   const service = harness.behavior.runService("execution-catalogue");
   await vi.waitFor(() => expect(release).toBeDefined());
+  const signalsBeforeAbort = harness.inspection.realtimeSignals.length;
   service.controller.abort();
   await harness.lifecycle.dispose();
   release();
   await expect(service.done).resolves.toBeUndefined();
-  expect(harness.inspection.realtimeSignals).toHaveLength(0);
+  expect(harness.inspection.realtimeSignals).toHaveLength(signalsBeforeAbort);
 });
 
 it("persists a terminal history error and reports the failed index without treating it as absent", async () => {
@@ -116,8 +117,8 @@ it("publishes a job failure even when persisting that failure also fails", async
   bb.storage.database().exec("CREATE TRIGGER reject_job_insert BEFORE INSERT ON execution_job BEGIN SELECT RAISE(ABORT, 'failure'); END");
   harness.sdk.stub("subscribe", () => () => {});
   const service = harness.behavior.runService("execution-catalogue");
-  await vi.waitFor(() => expect(harness.inspection.realtimeSignals.length).toBeGreaterThan(0));
-  expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "error" });
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionIndexStatus", null)).toMatchObject({ state: "error" }));
+  expect(harness.inspection.realtimeSignals.length).toBeGreaterThan(1);
   service.controller.abort(); await service.done; await harness.lifecycle.dispose();
 });
 
@@ -381,13 +382,14 @@ it("stops promptly while the initial catalogue request is unresolved and fences 
   await plugin(bb);
   const service = harness.behavior.runService("execution-catalogue");
   await vi.waitFor(() => expect(release).toBeDefined());
+  const signalsBeforeAbort = harness.inspection.realtimeSignals.length;
   service.controller.abort();
   await expect(Promise.race([service.done.then(() => "stopped"), new Promise((resolve) => setTimeout(() => resolve("timeout"), 200))])).resolves.toBe("stopped");
   expect(subscriptions).toBe(0);
   await harness.lifecycle.dispose();
   release!([makeThreadResponse({ id: "late" })]);
   await new Promise((resolve) => setTimeout(resolve, 0));
-  expect(harness.inspection.realtimeSignals).toHaveLength(0);
+  expect(harness.inspection.realtimeSignals).toHaveLength(signalsBeforeAbort);
 });
 
 it("clears an unpersisted per-ID storage failure after successful reconciliation", async () => {
@@ -571,11 +573,12 @@ it("drops a queued connected reconciliation after abort, even if the first reque
   const service = harness.behavior.runService("execution-catalogue");
   await vi.waitFor(() => expect(rejectFirst).toBeDefined());
   callbacks.get("realtime:connection")!({ state: "connected", reconnected: true, reconnectDelayMs: null } as never);
+  const signalsBeforeAbort = harness.inspection.realtimeSignals.length;
   service.controller.abort(); await service.done; await harness.lifecycle.dispose();
   rejectFirst!(new Error("terminal failure"));
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(list).toHaveBeenCalledTimes(1);
-  expect(harness.inspection.realtimeSignals).toHaveLength(0);
+  expect(harness.inspection.realtimeSignals).toHaveLength(signalsBeforeAbort);
 });
 
 it("bounds transient catalogue retries and consumes one queued connected trigger", async () => {
@@ -633,6 +636,26 @@ it("persists a reconnect catalogue error before backoff and resumes after succes
   } finally { vi.useRealTimers(); }
 });
 
+it("publishes the start of recovery before a slow catalogue finishes", async () => {
+  const callbacks = new Map<string, (event: never) => void>();
+  let blocked = false;
+  let release: (() => void) | undefined;
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: {
+    subscribe: ({ event, callback }) => { callbacks.set(event, callback as (event: never) => void); return () => callbacks.delete(event); },
+    threads: { list: async () => { if (blocked) await new Promise<void>((resolve) => { release = resolve; }); return [makeThreadResponse({ id: "t" })]; }, events: { list: async () => [] } },
+  } });
+  await plugin(bb);
+  const service = harness.behavior.runService("execution-catalogue");
+  await vi.waitFor(async () => expect(await harness.behavior.callRpc("getExecutionRebuildStatus", null)).toMatchObject({ state: "done", active: false }));
+  blocked = true;
+  const before = harness.inspection.realtimeSignals.length;
+  callbacks.get("realtime:connection")!({ state: "connected", reconnected: true } as never);
+  await vi.waitFor(() => expect(release).toBeDefined());
+  expect(harness.inspection.realtimeSignals.slice(before)).toContainEqual(expect.objectContaining({ payload: { progress: true } }));
+  expect(await harness.behavior.callRpc("getExecutionRebuildStatus", null)).toMatchObject({ kind: "recovery", state: "running", active: true });
+  service.controller.abort(); release!(); await service.done; await harness.lifecycle.dispose();
+});
+
 it("allows an explicit rebuild after recovery exhausts its catalogue retries", async () => {
   vi.useFakeTimers();
   try {
@@ -666,15 +689,19 @@ it("enters recovery after a busy job transition and persists the failure during 
       threads: { list: async () => [makeThreadResponse({ id: "t" })], events: { list: async () => [] } },
     } });
     const store = createExecutionProjectionStore(bb);
-    store.prepareStartup(); registerCatalogueFill(bb, store);
+    store.prepareStartup(); const catalogue = registerCatalogueFill(bb, store);
     const service = harness.behavior.runService("execution-catalogue");
     await vi.advanceTimersByTimeAsync(0);
     const beginRecovery = store.beginRecovery.bind(store);
     let busy = true;
     vi.spyOn(store, "beginRecovery").mockImplementation(() => { if (busy) throw Object.assign(new Error("locked"), { code: "SQLITE_BUSY" }); beginRecovery(); });
+    const before = harness.inspection.realtimeSignals.length;
     callbacks.get("realtime:connection")!({ state: "connected", reconnected: true } as never);
     await vi.advanceTimersByTimeAsync(0);
     expect(store.status().state).toBe("error");
+    expect(catalogue.status()).toMatchObject({ kind: "initial", state: "error", active: true });
+    expect(harness.inspection.realtimeSignals.slice(before)).toContainEqual(expect.objectContaining({ payload: { progress: true } }));
+    expect(catalogue.startRebuild()).toMatchObject({ kind: "initial", state: "error", active: true });
     expect(bb.storage.database().prepare("SELECT failure_scope FROM execution_job").get()).toEqual({ failure_scope: "catalogue" });
     busy = false;
     await vi.advanceTimersByTimeAsync(1000);

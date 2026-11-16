@@ -37,3 +37,18 @@ it("keeps recovery error visible and disables rebuilding in both windows until r
   act(() => { for (const handler of mock.handlers) handler(); });
   await waitFor(() => expect(screen.getAllByRole("button", { name: "Rebuild execution index" }).every((button) => !button.hasAttribute("disabled"))).toBe(true));
 });
+
+it("disables both open windows when synchronization starts before the job kind can change", async () => {
+  mock.status = { kind: "initial", state: "done", total: 1, done: 1, errors: 0, tooLarge: 0, active: false };
+  const first = render(<RebuildSettings />);
+  const second = render(<RebuildSettings />);
+  await waitFor(() => expect(screen.getAllByRole("button", { name: "Rebuild execution index" }).every((button) => !button.hasAttribute("disabled"))).toBe(true));
+  mock.status = { ...mock.status, state: "error", active: true };
+  act(() => { for (const handler of mock.handlers) handler(); });
+  await waitFor(() => {
+    for (const window of [first, second]) {
+      expect(within(window.container).getByRole("button", { name: "Rebuild execution index" }).hasAttribute("disabled")).toBe(true);
+      expect(within(window.container).getByText(/Index synchronization is in progress/)).toBeTruthy();
+    }
+  });
+});

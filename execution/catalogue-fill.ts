@@ -46,6 +46,7 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
       let active = 0;
       let wake: (() => void) | undefined;
       const publish = (id?: string) => { if (!stale()) bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, id ? { threadId: id } : {}); };
+      const publishProgress = () => { if (!stale()) bb.realtime.publish(EXECUTION_CHANGED_CHANNEL, { progress: true }); };
       const changed = (id: string, check: boolean, force = true, liveChange = true) => {
         if (stale()) return;
         revisions.set(id, (revisions.get(id) ?? 0) + 1);
@@ -164,16 +165,17 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
         scanRequested = true;
         if (scanRunning) return;
         scanRunning = true;
-        let cleanupNeeded = false;
         const recordScanFailure = () => {
           if (stale()) return;
           try { store.fail(); } catch { /* storage is unavailable */ }
-          publish();
+          publishProgress();
         };
         try {
-          await retry(async () => { if (!stale()) store.beginRecovery(); }, recordScanFailure);
           while (scanRequested && !stale()) {
             scanRequested = false;
+            publishProgress();
+            await retry(async () => { if (!stale()) store.beginRecovery(); }, recordScanFailure);
+            if (stale()) return;
             const touched = new Set<string>(); snapshotChanges = touched;
             const threads = await retry(() => bb.sdk.threads.list({ includeHidden: false }), recordScanFailure);
             if (stale()) return;
@@ -195,13 +197,14 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
               await drain();
               if (stale()) return;
             }
-            const completed = await retry(async () => {
+            await retry(async () => {
               while (!stale() && (pending.size || active)) await drain();
-              if (!stale() && !scanRequested) return store.finish();
-              return false;
+              if (!stale() && !scanRequested && store.finish()) {
+                publish();
+                try { store.cleanup(); } catch { bb.log.error("Execution index cleanup failed; it will be retried at startup"); }
+              }
             }, recordScanFailure);
             if (scanRequested) continue;
-            cleanupNeeded = completed;
           }
         } catch (error) {
           snapshotChanges = undefined;
@@ -212,12 +215,7 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
         } finally {
           scanRunning = false;
           if (scanRequested && !stale()) void scan();
-          else {
-            publish();
-            if (cleanupNeeded && !stale()) {
-              try { store.cleanup(); } catch { bb.log.error("Execution index cleanup failed; it will be retried at startup"); }
-            }
-          }
+          else publishProgress();
         }
       };
       requestScan = () => { void scan(); };

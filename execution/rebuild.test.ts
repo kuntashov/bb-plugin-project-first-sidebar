@@ -2,6 +2,38 @@ import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/tes
 import { expect, it, vi } from "vitest";
 import plugin from "../server.js";
 import { createExecutionProjectionStore } from "./projection-store.js";
+import { registerCatalogueFill } from "./catalogue-fill.js";
+
+it("publishes cutover and cleans the old generation before a queued reconnect scan", async () => {
+  const callbacks = new Map<string, (event: never) => void>();
+  let block = false, calls = 0;
+  let release: (() => void) | undefined;
+  const thread = makeThreadResponse({ id: "t" });
+  const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: {
+    subscribe: ({ event, callback }) => { callbacks.set(event, callback as (event: never) => void); return () => callbacks.delete(event); },
+    threads: { list: async () => { calls++; if (block && calls >= 3) await new Promise<void>((resolve) => { release = resolve; }); return [thread]; }, events: { list: async () => [] } },
+  } });
+  const store = createExecutionProjectionStore(bb);
+  store.prepareStartup();
+  const catalogue = registerCatalogueFill(bb, store);
+  const service = harness.behavior.runService("execution-catalogue");
+  await vi.waitFor(() => expect(store.status().state).toBe("done"));
+  const finish = store.finish.bind(store);
+  vi.spyOn(store, "finish").mockImplementation(() => {
+    const result = finish();
+    if (block && result) queueMicrotask(() => callbacks.get("realtime:connection")!({ state: "connected", reconnected: true } as never));
+    return result;
+  });
+  block = true;
+  const before = harness.inspection.realtimeSignals.length;
+  catalogue.startRebuild();
+  await vi.waitFor(() => expect(release).toBeDefined());
+  expect(bb.storage.database().prepare("SELECT active_generation FROM execution_meta").get()).toEqual({ active_generation: 2 });
+  expect(harness.inspection.realtimeSignals.slice(before).filter((signal) => JSON.stringify(signal.payload) === "{}")).toHaveLength(1);
+  expect(bb.storage.database().prepare("SELECT DISTINCT generation FROM execution_projection").all()).toEqual([{ generation: 2 }]);
+  expect(catalogue.status()).toMatchObject({ kind: "recovery", state: "running", active: true });
+  service.controller.abort(); release!(); await service.done; await harness.lifecycle.dispose();
+});
 
 it("creates the final schema and resumes an interrupted initial job", async () => {
   const { bb, harness } = createFakePluginHost({ pluginId: "project-first-sidebar" });

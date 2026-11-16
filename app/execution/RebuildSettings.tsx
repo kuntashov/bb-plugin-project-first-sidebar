@@ -31,12 +31,14 @@ export function RebuildSettings() {
     finally { setBusy(false); }
   }
   const recovering = status?.kind === "recovery" && (status.state === "running" || status.active);
+  const synchronizing = !!status?.active && status.kind !== "recovery" && status.state !== "running";
   return <div className="flex flex-col gap-3">
     <p role={error || status?.state === "error" ? "alert" : "status"}>
       {error ? "Execution index status is unavailable." : !status ? "Loading execution index status…" : `${status.kind}: ${status.state} — ${status.done} / ${status.total} processed, thread errors: ${status.errors}.`}
       {recovering && " Wait for recovery to finish before rebuilding."}
+      {synchronizing && " Index synchronization is in progress. Wait for it to finish before rebuilding."}
       {!!status?.tooLarge && ` ${status.tooLarge} histories exceed the SDK response size limit (413).`}
     </p>
-    <Button disabled={busy || !status || recovering} onClick={() => void start()}>Rebuild execution index</Button>
+    <Button disabled={busy || error || !status || recovering || synchronizing} onClick={() => void start()}>Rebuild execution index</Button>
   </div>;
 }
