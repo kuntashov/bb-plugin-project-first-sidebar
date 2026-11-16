@@ -162,18 +162,22 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
         wake = undefined;
       }
       dispatch = changed;
+      const requestLiveScan = () => {
+        if (stale()) return;
+        globalRevision++;
+        store.invalidateAll();
+        publish();
+        scanLiveRequested = true;
+        scanRequested = true;
+        requestScan?.();
+      };
       const unsubscribeThread = bb.sdk.subscribe({ event: "thread:changed", callback: (event) => {
         if (!event.id) {
           const membershipOrRewrite = event.changes.some((change) => ["thread-created", "thread-deleted", "title-changed", "archived-changed", "history-rewritten", "history-compacted"].includes(change));
           const types = event.metadata?.eventTypes;
           const relevantAppend = event.changes.includes("events-appended") && (!types?.length || types.some((type) => type === "turn/input/accepted" || type === "client/turn/requested"));
           if (membershipOrRewrite || relevantAppend) {
-            globalRevision++;
-            store.invalidateAll();
-            publish();
-            scanLiveRequested = true;
-            scanRequested = true;
-            requestScan?.();
+            requestLiveScan();
           }
           return;
         }
@@ -246,7 +250,7 @@ export function registerCatalogueFill(bb: BbPluginApi, store: ReturnType<typeof 
       };
       requestScan = () => { void scan(); };
       const unsubscribeConnection = bb.sdk.subscribe({ event: "realtime:connection", callback: (event) => {
-        if (event.state === "connected") void scan();
+        if (event.state === "connected") requestLiveScan();
       } });
       for (const id of early) changed(id, true);
       early.clear();
