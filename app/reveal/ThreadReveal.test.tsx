@@ -6,7 +6,7 @@ import { renderSlot, loadPluginApp } from "@get-bb/plugin-sdk/testing/app";
 import type { PluginThreadListProps } from "@get-bb/plugin-sdk/app";
 import { makeThreadResponse } from "@get-bb/plugin-sdk/testing";
 import { ThreadReveal, requestThreadReveal } from "./ThreadReveal.js";
-import { makePluginProject, makeSidebarThread } from "../model/fixtures.js";
+import { makePluginProject, makeSidebarEnvironment, makeSidebarThread } from "../model/fixtures.js";
 import { defaultPreferences, type PreferenceValues } from "../../shared/preferences.js";
 import { defaultFilterDocument } from "../../shared/filters.js";
 import { windowFilterStore } from "../filters/filter-store.js";
@@ -19,6 +19,7 @@ const parent = makeSidebarThread({ id: "parent", projectId: "app", title: "Paren
 const child = makeSidebarThread({ id: "child", projectId: "app", title: "Child", parentThreadId: "parent" });
 const props: PluginThreadListProps = { activeThreadId: null, activeProjectId: null, isCompactViewport: false, onNavigate: () => {}, searchQuery: "" };
 const scroll = vi.fn();
+const EMPTY_SECTION_DOCUMENT = { schemaVersion: 1 as const, revision: 0, sections: [], order: [] };
 
 beforeEach(() => {
   setPreferencesMirrorStorageForTest(null);
@@ -26,9 +27,24 @@ beforeEach(() => {
   Element.prototype.scrollIntoView = scroll;
   scroll.mockClear();
 });
-afterEach(() => { vi.restoreAllMocks(); cleanup(); resetPreferencesSyncForTest(); setPreferencesMirrorStorageForTest(undefined); });
+afterEach(() => {
+  document.getElementById("split-surface")?.remove();
+  vi.restoreAllMocks();
+  cleanup();
+  resetPreferencesSyncForTest();
+  setPreferencesMirrorStorageForTest(undefined);
+});
 
-async function mount(preferences: Partial<PreferenceValues> = {}, threads = [parent, child], extra: Parameters<typeof renderSlot>[2] = {}, pinnedMode: "filter" | "always-show" = "filter") {
+async function mount(
+  preferences: Partial<PreferenceValues> = {},
+  threads = [parent, child],
+  extra: Parameters<typeof renderSlot>[2] = {},
+  pinnedMode: "filter" | "always-show" = "filter",
+  placement?: {
+    document: { schemaVersion: 1; revision: number; sections: { id: string; projectId: string; name: string }[]; order: { projectId: string; sectionIds: string[] }[] };
+    metadata: Record<string, Record<string, unknown>>;
+  },
+) {
   const prefs = { ...defaultPreferences(), ...preferences };
   function Component() { return <><ThreadReveal /><list.component {...props} /></>; }
   const document = { ...defaultFilterDocument(), pinnedMode, revision: (windowFilterStore.getSnapshot().document?.revision ?? 0) + 1,
@@ -38,6 +54,14 @@ async function mount(preferences: Partial<PreferenceValues> = {}, threads = [par
     rpc: {
       listPreferences: () => ({ preferences: prefs }), setPreference: (input: unknown) => input,
       listFilters: () => ({ status: "success", document }),
+      listProjectSections: () => ({ status: "success", document: placement?.document ?? EMPTY_SECTION_DOCUMENT }),
+      readProjectSectionMetadata: (input: unknown) => ({
+        status: "success" as const,
+        threads: ((input as { threadIds?: string[] } | null)?.threadIds ?? []).map((threadId) => ({
+          threadId,
+          metadata: placement?.metadata[threadId] ?? {},
+        })),
+      }),
     },
     sidebarThreads: { projects, threads, sections: [{ id: "later", name: "Later", createdAt: 1, updatedAt: 1 }],
       experimental_archived: { status: "ready", hasNextPage: false, isFetchingNextPage: false, isFetchNextPageError: false, fetchNextPage: async () => {} } },
@@ -48,7 +72,14 @@ async function mount(preferences: Partial<PreferenceValues> = {}, threads = [par
   return view;
 }
 async function reveal(id = "child") { await act(async () => requestThreadReveal(id)); }
-function row(id = "child") { return document.querySelector<HTMLElement>(`a[data-sidebar-thread-id="${id}"]`); }
+function row(id = "child") {
+  const sidebar = document.querySelector("[data-project-first-sidebar]");
+  return sidebar?.querySelector<HTMLElement>(`a[data-sidebar-thread-id="${id}"]`) ?? null;
+}
+function lastPreference(calls: { method: string; input?: unknown }[], key: string) {
+  const writes = calls.filter((call) => call.method === "setPreference" && (call.input as { key?: string }).key === key);
+  return writes.at(-1)?.input;
+}
 
 describe("explicit reveal through the mounted sidebar", () => {
   it("switches excluded projects to All, expands the root section and focuses the same open thread repeatedly", async () => {
@@ -178,6 +209,178 @@ describe("explicit reveal through the mounted sidebar", () => {
     fireEvent.click(screen.getByRole("button", { name: "Отмена" }));
     expect(get).toHaveBeenCalledOnce();
     expect(fetchNextPage).not.toHaveBeenCalled();
+  });
+
+  it("opens the project section, worktree group and ancestors, and focuses the sidebar row", async () => {
+    const linked = makeSidebarEnvironment({ id: "env_linked", name: "linked", isWorktree: true, providerId: "git-worktree" });
+    const linkedParent = makeSidebarThread({ id: "parent", projectId: "app", title: "Parent", environment: linked });
+    const linkedSibling = makeSidebarThread({ id: "sibling", projectId: "app", title: "Sibling", environment: linked });
+    const linkedChild = makeSidebarThread({ id: "child", projectId: "app", title: "Child", parentThreadId: "parent", environment: linked });
+    const outside = document.createElement("a");
+    outside.id = "split-surface";
+    outside.dataset.sidebarThreadId = "child";
+    outside.href = "#split";
+    outside.textContent = "Split child";
+    document.body.append(outside);
+    const { rpcCalls } = await mount({
+      collapsedProjects: ["app", "web"],
+      collapsedThreads: ["parent"],
+      collapsedEnvironments: ["env_linked"],
+      collapsedThreadSections: ["project-section:app::sec_alpha", "project-section:app::sec_beta", "project-section:web::sec_other"],
+    }, [linkedParent, linkedSibling, linkedChild], {}, "filter", {
+      document: {
+        schemaVersion: 1,
+        revision: 1,
+        sections: [
+          { id: "sec_alpha", projectId: "app", name: "Alpha" },
+          { id: "sec_beta", projectId: "app", name: "Beta" },
+        ],
+        order: [{ projectId: "app", sectionIds: ["sec_alpha", "sec_beta"] }],
+      },
+      metadata: {
+        parent: { projectId: "app", projectSectionId: "sec_alpha" },
+        sibling: { projectId: "app", projectSectionId: "sec_alpha" },
+        child: { projectId: "app", projectSectionId: "sec_beta" },
+      },
+    });
+    act(() => windowFilterStore.setActiveFilterId("app-only"));
+    expect(row()).toBeNull();
+    await reveal();
+    await waitFor(() => expect(document.activeElement).toBe(row()));
+    expect(row()?.closest("[data-project-section-id]")?.getAttribute("data-project-section-id")).toBe("sec_alpha");
+    expect(document.querySelector("[data-project-section-id='sec_alpha']")?.getAttribute("data-project-section-collapsed")).toBe("false");
+    expect(document.querySelector("[data-project-section-id='sec_beta']")?.getAttribute("data-project-section-collapsed")).toBe("true");
+    expect(screen.getByRole("button", { name: "Collapse linked threads" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Collapse Parent threads" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Collapse App section" })).toBeTruthy();
+    expect(windowFilterStore.getSnapshot().activeFilterId).toBe("app-only");
+    expect(scroll).toHaveBeenCalled();
+    await flushPreferenceWritesForTest();
+    expect(lastPreference(rpcCalls, "collapsedThreadSections")).toEqual({
+      key: "collapsedThreadSections",
+      value: ["project-section:app::sec_beta", "project-section:web::sec_other"],
+    });
+    expect(lastPreference(rpcCalls, "collapsedProjects")).toEqual({ key: "collapsedProjects", value: ["web"] });
+    expect(lastPreference(rpcCalls, "collapsedEnvironments")).toEqual({ key: "collapsedEnvironments", value: [] });
+    expect(lastPreference(rpcCalls, "collapsedThreads")).toEqual({ key: "collapsedThreads", value: [] });
+  });
+
+  it("switches an excluded project to All and opens that thread's project section", async () => {
+    const root = makeSidebarThread({ id: "parent", projectId: "app", title: "Parent" });
+    await mount({
+      collapsedProjects: ["app"],
+      collapsedThreadSections: ["project-section:app::sec_alpha"],
+    }, [root], {}, "filter", {
+      document: {
+        schemaVersion: 1,
+        revision: 1,
+        sections: [{ id: "sec_alpha", projectId: "app", name: "Alpha" }],
+        order: [{ projectId: "app", sectionIds: ["sec_alpha"] }],
+      },
+      metadata: { parent: { projectId: "app", projectSectionId: "sec_alpha" } },
+    });
+    act(() => windowFilterStore.setActiveFilterId("web-only"));
+    expect(row("parent")).toBeNull();
+    await reveal("parent");
+    await waitFor(() => expect(document.activeElement).toBe(row("parent")));
+    expect(windowFilterStore.getSnapshot().activeFilterId).toBe("all");
+    expect(row("parent")?.closest("[data-project-section-id]")?.getAttribute("data-project-section-id")).toBe("sec_alpha");
+  });
+
+  it("reveals a pinned thread in Pinned and leaves its project section collapsed", async () => {
+    const pinnedParent = makeSidebarThread({ id: "parent", projectId: "app", title: "Parent", pinnedAt: 1, isPinned: true });
+    const pinnedChild = makeSidebarThread({ id: "child", projectId: "app", title: "Child", parentThreadId: "parent" });
+    const { rpcCalls } = await mount({
+      collapsedSections: ["pinned"],
+      collapsedProjects: ["app"],
+      collapsedThreadSections: ["project-section:app::sec_alpha"],
+    }, [pinnedParent, pinnedChild], {}, "always-show", {
+      document: {
+        schemaVersion: 1,
+        revision: 1,
+        sections: [{ id: "sec_alpha", projectId: "app", name: "Alpha" }],
+        order: [{ projectId: "app", sectionIds: ["sec_alpha"] }],
+      },
+      metadata: {
+        parent: { projectId: "app", projectSectionId: "sec_alpha" },
+        child: { projectId: "app", projectSectionId: "sec_beta" },
+      },
+    });
+    act(() => windowFilterStore.setActiveFilterId("web-only"));
+    await reveal();
+    await waitFor(() => expect(document.activeElement).toBe(row()));
+    const pinnedGroup = screen.getByRole("button", { name: "Collapse Pinned section" }).closest("[data-sidebar-rename-row]");
+    expect(pinnedGroup?.contains(row()!)).toBe(true);
+    expect(row()?.closest("[data-project-section-id]")).toBeNull();
+    expect(windowFilterStore.getSnapshot().activeFilterId).toBe("web-only");
+    await flushPreferenceWritesForTest();
+    for (const call of rpcCalls.filter((item) => item.method === "setPreference")) {
+      const input = call.input as { key: string; value: unknown };
+      if (input.key === "collapsedThreadSections") expect(input.value).toContain("project-section:app::sec_alpha");
+      if (input.key === "collapsedProjects") expect(input.value).toContain("app");
+    }
+  });
+
+  it("reveals an archived thread in the section the loaded archive page already shows", async () => {
+    const archived = makeSidebarThread({
+      id: "archived-root", projectId: "app", title: "Archived root", archivedAt: 4, isArchived: true,
+    });
+    const fetchNextPage = vi.fn(async () => {});
+    await mount({
+      threadLifecycles: ["active", "archived"],
+      collapsedProjects: ["app"],
+      collapsedThreadSections: ["project-section:app::sec_alpha", "project-section:app::sec_beta"],
+    }, [archived], {
+      sidebarThreads: {
+        projects,
+        threads: [archived],
+        sections: [],
+        experimental_archived: {
+          status: "ready", hasNextPage: true, isFetchingNextPage: false, isFetchNextPageError: false, fetchNextPage,
+        },
+      },
+    }, "filter", {
+      document: {
+        schemaVersion: 1,
+        revision: 1,
+        sections: [
+          { id: "sec_alpha", projectId: "app", name: "Alpha" },
+          { id: "sec_beta", projectId: "app", name: "Beta" },
+        ],
+        order: [{ projectId: "app", sectionIds: ["sec_alpha", "sec_beta"] }],
+      },
+      metadata: { "archived-root": { projectId: "app", projectSectionId: "sec_alpha" } },
+    });
+    await reveal("archived-root");
+    await waitFor(() => expect(document.activeElement).toBe(row("archived-root")));
+    expect(row("archived-root")?.closest("[data-project-section-id]")?.getAttribute("data-project-section-id")).toBe("sec_alpha");
+    expect(document.querySelector("[data-project-section-id='sec_beta']")?.getAttribute("data-project-section-collapsed")).toBe("true");
+    expect(fetchNextPage).not.toHaveBeenCalled();
+  });
+
+  it("leaves the project section collapsed when archive confirmation is cancelled", async () => {
+    const archived = { ...child, isArchived: true, archivedAt: 1 };
+    const { rpcCalls } = await mount({
+      hiddenGroups: ["project:app"],
+      collapsedProjects: ["app"],
+      collapsedThreadSections: ["project-section:app::sec_alpha"],
+    }, [parent, archived], {}, "filter", {
+      document: {
+        schemaVersion: 1,
+        revision: 1,
+        sections: [{ id: "sec_alpha", projectId: "app", name: "Alpha" }],
+        order: [{ projectId: "app", sectionIds: ["sec_alpha"] }],
+      },
+      metadata: { parent: { projectId: "app", projectSectionId: "sec_alpha" } },
+    });
+    act(() => windowFilterStore.setActiveFilterId("web-only"));
+    await reveal();
+    fireEvent.click(await screen.findByRole("button", { name: "Отмена" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await flushPreferenceWritesForTest();
+    expect(windowFilterStore.getSnapshot().activeFilterId).toBe("web-only");
+    expect(rpcCalls.filter((call) => call.method === "setPreference")).toEqual([]);
+    expect(row()).toBeNull();
   });
 
   it("aborts pending positioning and clears highlighting when unmounted", async () => {

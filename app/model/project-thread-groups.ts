@@ -349,12 +349,11 @@ export function buildProjectThreadGroups(
   );
 }
 
-function buildThreadTreeItems(
+export function buildProjectThreadRootNodes(
   allThreads: readonly SidebarThread[],
-  compareThreads: ThreadComparator,
-  groupEnvironmentThreads: boolean,
-  respectSections = false,
-): ProjectThreadItem[] {
+  compareThreads: ThreadComparator = compareStandardThreads,
+  groupEnvironmentThreads = true,
+): ProjectThreadNode[] {
   const projectThreads = allThreads.filter(isSidebarProjectThread);
   const projectThreadIds = new Set(projectThreads.map((thread) => thread.id));
   const childrenByParentId = new Map<string, SidebarThread[]>();
@@ -407,8 +406,29 @@ function buildThreadTreeItems(
     );
   }
 
+  return rootNodes;
+}
+
+export function arrangeProjectThreadRoots(
+  nodes: readonly ProjectThreadNode[],
+  compareThreads: ThreadComparator,
+  groupEnvironmentThreads: boolean,
+): ProjectThreadItem[] {
+  return buildSortedItems([...nodes], compareThreads, groupEnvironmentThreads);
+}
+
+function buildThreadTreeItems(
+  allThreads: readonly SidebarThread[],
+  compareThreads: ThreadComparator,
+  groupEnvironmentThreads: boolean,
+  respectSections = false,
+): ProjectThreadItem[] {
   return buildSortedItems(
-    rootNodes,
+    buildProjectThreadRootNodes(
+      allThreads,
+      compareThreads,
+      groupEnvironmentThreads,
+    ),
     compareThreads,
     groupEnvironmentThreads,
     respectSections,

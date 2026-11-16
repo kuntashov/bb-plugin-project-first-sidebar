@@ -78,6 +78,15 @@ const missingRpcHandlers: PluginRpcTestHandlers<FilterRpcContract> = {
   reorderFilters: missingRpc("reorderFilters"),
   setPinnedMode: missingRpc("setPinnedMode"),
   setDisplayMode: missingRpc("setDisplayMode"),
+  listProjectSections: missingRpc("listProjectSections"),
+  createProjectSection: missingRpc("createProjectSection"),
+  renameProjectSection: missingRpc("renameProjectSection"),
+  deleteProjectSection: missingRpc("deleteProjectSection"),
+  assignProjectSection: missingRpc("assignProjectSection"),
+  clearProjectSectionAssignment: missingRpc("clearProjectSectionAssignment"),
+  readProjectSectionMetadata: missingRpc("readProjectSectionMetadata"),
+  reorderProjectSections: missingRpc("reorderProjectSections"),
+  createProjectSectionThread: missingRpc("createProjectSectionThread"),
 };
 
 function renderTypedSlot<Props extends object>(

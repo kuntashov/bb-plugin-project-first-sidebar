@@ -5,7 +5,7 @@ import { windowFilterStore } from "../filters/filter-store.js";
 import { useSidebarData } from "../model/use-sidebar-data.js";
 import { usePreferencesReady } from "../preferences/PreferencesSync.js";
 import { sidebarHiddenGroupsAtom, sidebarOrganizationModeAtom, sidebarThreadLifecyclesAtom } from "../preferences/atoms.js";
-import { useExpandSidebarThreadPath } from "../list/useSidebarThreadReveal.js";
+import { projectSectionRevealPlacement, useExpandSidebarThreadPath } from "../list/useSidebarThreadReveal.js";
 import { buildPinnedSidebarState } from "../model/pinned-sidebar-threads.js";
 import { projectSidebarSnapshot } from "../model/sidebar-projection.js";
 import { loadRevealTarget } from "../reveal/reveal-data.js";
@@ -103,8 +103,16 @@ export function useSearchNavigation() {
     const plan = planThreadReveal(placementChain, { organizationMode: store.get(sidebarOrganizationModeAtom),
       threadLifecycles: store.get(sidebarThreadLifecyclesAtom), hiddenGroups: store.get(sidebarHiddenGroupsAtom) }, current.personalProject?.id ?? null);
     if (plan.hiddenGroupId) store.set(sidebarHiddenGroupsAtom, (ids) => ids.filter((id) => id !== plan.hiddenGroupId));
+    const pinnedIds = buildPinnedSidebarState({ threads: current.threads }).effectivePinnedThreadIds;
+    await waitForReveal(() => {
+      const value = document.querySelector("[data-project-section-status]")?.getAttribute("data-project-section-status");
+      const sectionStatus = value === "ready" || value === "error" ? value : "loading";
+      return !projectSectionRevealPlacement({ thread: loadedTarget, threadById, sidebarProjectId,
+        organizationMode: store.get(sidebarOrganizationModeAtom), personalProjectId: current.personalProject?.id ?? null,
+        pinned: pinnedIds.has(target.id), sectionStatus }).pending;
+    }, signal);
     latest.current.expandPath({ thread: loadedTarget, threadById, sidebarProjectId,
-      effectivePinnedThreadIds: buildPinnedSidebarState({ threads: current.threads }).effectivePinnedThreadIds,
+      effectivePinnedThreadIds: pinnedIds,
       personalProjectId: current.personalProject?.id ?? null });
     await positionRevealThread(root, target.id, signal);
   };

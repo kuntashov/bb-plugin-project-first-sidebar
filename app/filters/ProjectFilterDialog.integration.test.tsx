@@ -118,6 +118,10 @@ describe("sidebar filter editor dialog wiring", () => {
             }],
           },
         }),
+        listProjectSections: () => ({
+          status: "success",
+          document: { schemaVersion: 1, revision: 0, sections: [], order: [] },
+        }),
       },
     });
 
@@ -226,6 +230,17 @@ describe("sidebar filter editor dialog wiring", () => {
         }),
         setPreference: (input: unknown) => input,
         listFilters,
+        listProjectSections: () => ({
+          status: "success" as const,
+          document: { schemaVersion: 1, revision: 0, sections: [], order: [] },
+        }),
+        readProjectSectionMetadata: (input: unknown) => ({
+          status: "success" as const,
+          threads: ((input as { threadIds?: string[] } | null)?.threadIds ?? []).map((threadId) => ({
+            threadId,
+            metadata: {},
+          })),
+        }),
       },
     });
 

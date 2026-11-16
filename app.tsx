@@ -5,12 +5,19 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { ImportPreferences } from "./app/preferences/ImportPreferences.js";
 import { PreferencesSync } from "./app/preferences/PreferencesSync.js";
 import { ProjectList } from "./app/list/ProjectList.js";
+import { ProjectSectionSync } from "./app/project-sections/ProjectSectionSync.js";
 import { ProjectFilterEditor } from "./app/filters/ProjectFilterEditor.js";
 import { ProjectFilterDialog } from "./app/filters/ProjectFilterDialog.js";
 import { useSidebarThreadReveal } from "./app/list/useSidebarThreadReveal.js";
 import { ThreadReveal, requestThreadReveal } from "./app/reveal/ThreadReveal.js";
 import { QuickThreadSearch, requestQuickThreadSearch } from "./app/search/QuickThreadSearch.js";
+import { assignProjectSectionAction } from "./app/rows/assignProjectSectionAction.js";
 import { moveThreadAction } from "./app/rows/moveThreadAction.js";
+
+function ProjectSidebarReveal() {
+  useSidebarThreadReveal();
+  return null;
+}
 
 function ThreadList({
   activeThreadId,
@@ -26,18 +33,20 @@ function ThreadList({
   const restoreFilterDialogFocus = useCallback(() => {
     filterDialogTrigger.current?.focus();
   }, []);
-  useSidebarThreadReveal();
   return (
     <CompactViewportOverrideProvider isCompactViewport={isCompactViewport}>
       <TooltipProvider>
         <PreferencesSync />
-        <div data-project-first-sidebar="" className="contents">
-          <ProjectList
-            activeThreadId={activeThreadId}
-            onProjectSelect={onNavigate}
-            onManageFilters={openFilterDialog}
-          />
-        </div>
+        <ProjectSectionSync>
+          <div data-project-first-sidebar="" className="contents">
+            <ProjectList
+              activeThreadId={activeThreadId}
+              onProjectSelect={onNavigate}
+              onManageFilters={openFilterDialog}
+            />
+          </div>
+          <ProjectSidebarReveal />
+        </ProjectSectionSync>
         <ProjectFilterDialog
           open={isFilterDialogOpen}
           onOpenChange={setIsFilterDialogOpen}
@@ -85,4 +94,5 @@ export default definePluginApp((app) => {
     component: ThreadList,
   });
   app.slots.experimental_threadAction(moveThreadAction);
+  app.slots.experimental_threadAction(assignProjectSectionAction);
 });

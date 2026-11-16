@@ -53,15 +53,20 @@ async function mount(options: RenderSlotOptions = {}, initiallyShowSidebar = tru
   function Component() { const [, force] = useReducer((value) => value + 1, 0); renderParent = force; const [visible, setVisible] = useState(initiallyShowSidebar); showSidebar = () => setVisible(true); return <><QuickThreadSearch />{visible ? <ThreadList activeThreadId={null} activeProjectId={null} isCompactViewport={false} onNavigate={() => {}} searchQuery="" /> : null}</>; }
   const list = vi.fn(async (args: Parameters<PluginBrowserBbSdk["threads"]["list"]>[0] = {}) => args.offset ? [] : args.archived ? [archived] : [current, sibling]);
   const get = vi.fn(async ({ threadId }: Parameters<PluginBrowserBbSdk["threads"]["get"]>[0]) => makeThreadResponse({ ...(threadId === archived.id ? archived : threadId === sibling.id ? sibling : current), id: threadId }));
+  const rpc = { listPreferences: () => ({ preferences: defaultPreferences() }), setPreference: (input: unknown) => input,
+      listFilters: () => ({ status: "success", document: { ...defaultFilterDocument(), revision: (windowFilterStore.getSnapshot().document?.revision ?? 0) + 1,
+        filters: [{ id: "app-only", name: "Рабочие", rule: { kind: "projectIds", projectIds: ["app"] } }] } }) ,
+      listProjectSections: () => ({ status: "success", document: { schemaVersion: 1, revision: 0, sections: [], order: [] } }),
+      readProjectSectionMetadata: (input: unknown) => ({ status: "success", threads: ((input as { threadIds: string[] }).threadIds).map((threadId) => ({ threadId, metadata: {} })) }),
+    };
   const view = renderSlot({ component: Component }, {}, {
     pluginId: "project-first-sidebar",
     sidebarThreads: { status: "ready", projects: [makePluginProject({ id: "app", name: "App" })],
       sections: [], threads: [makeSidebarThread({ id: "current", projectId: "app", title: current.title, updatedAt: 5 })] },
-    rpc: { listPreferences: () => ({ preferences: defaultPreferences() }), setPreference: (input: unknown) => input,
-      listFilters: () => ({ status: "success", document: { ...defaultFilterDocument(), revision: (windowFilterStore.getSnapshot().document?.revision ?? 0) + 1,
-        filters: [{ id: "app-only", name: "Рабочие", rule: { kind: "projectIds", projectIds: ["app"] } }] } }) },
+
     sdk: { subscribe: () => () => {}, projects: { list: async () => [project] }, threads: { list, get } },
     ...options,
+    rpc: { ...rpc, ...options.rpc },
   });
   await waitFor(() => expect(windowFilterStore.getSnapshot().status).toBe("ready"));
   act(() => requestQuickThreadSearch());
@@ -226,6 +231,28 @@ describe("keyboard quick navigation", () => {
     expect(list.mock.calls.every(([args]) => !args?.archived)).toBe(true);
     expect(windowFilterStore.getSnapshot().activeFilterId).toBe("app-only");
     expect(document.querySelector('a[data-sidebar-thread-id="parent"]')).toBeNull();
+  });
+  it("waits for project-section metadata and opens only the matching collapsed section", async () => {
+    let release!: () => void;
+    const metadataReady = new Promise<void>((resolve) => { release = resolve; });
+    const { view } = await mount({ rpc: {
+      listPreferences: () => ({ preferences: { ...defaultPreferences(), collapsedThreadSections: ["project-section:app::alpha", "project-section:app::beta"] } }),
+      listProjectSections: () => ({ status: "success", document: { schemaVersion: 1, revision: 1,
+        sections: [{ id: "alpha", projectId: "app", name: "Alpha" }, { id: "beta", projectId: "app", name: "Beta" }],
+        order: [{ projectId: "app", sectionIds: ["alpha", "beta"] }] } }),
+      readProjectSectionMetadata: async (input: unknown) => {
+        await metadataReady;
+        return { status: "success", threads: (input as { threadIds: string[] }).threadIds.map((threadId) => ({ threadId,
+          metadata: threadId === "current" ? { projectId: "app", projectSectionId: "alpha" } : {} })) };
+      },
+    } });
+    const input = await chooseFilter(); fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(view.inspection.navigateCalls).toContainEqual({ method: "toThread", threadId: "current" }));
+    expect(document.activeElement?.getAttribute("data-sidebar-thread-id")).not.toBe("current");
+    await act(async () => release());
+    await waitFor(() => expect(document.activeElement?.getAttribute("data-sidebar-thread-id")).toBe("current"));
+    expect(document.activeElement?.closest("[data-project-section-id]")?.getAttribute("data-project-section-id")).toBe("alpha");
+    expect(document.querySelector('[data-project-section-id="beta"]')?.getAttribute("data-project-section-collapsed")).toBe("true");
   });
   it("refreshes complete metadata on relevant realtime changes, not every streaming delta", async () => {
     let change: (changes: "thread-created"[] | "events-appended"[]) => void = () => {};
