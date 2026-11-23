@@ -1,7 +1,6 @@
 import { ThreadCreationPlacementScope } from "./ThreadCreationPlacement.js";
 import {
   createContext,
-  useCallback,
   useContext,
   useEffect,
   useMemo,
@@ -33,12 +32,7 @@ import {
   type SidebarVisibilityItem,
 } from "@/components/ui/sidebar-visibility-customize";
 import { SidebarTouchSensor } from "../dnd/sidebarTouchSensor.js";
-import {
-  CustomizeRowActionsContext,
-  ThreadRowActionsCustomizingContext,
-  type ThreadRowActionsCustomizing,
-} from "./customizeRowActionsContext.js";
-import { useFinishRowActionsOnOutsideClick } from "./ThreadRowActionsCustomize.js";
+import { ThreadRowActionsCustomizationScope } from "./ThreadRowActionsCustomize.js";
 
 export interface ThreadListVisibilityGroup extends SidebarVisibilityItem {
   id: SidebarSectionId;
@@ -76,13 +70,9 @@ export function ThreadListVisibility({
 }) {
   const [hidden, setHidden] = useAtom(sidebarHiddenGroupsAtom);
   const [customizing, setCustomizing] = useState<"list" | null>(null);
-  const [rowActionsThreadId, setRowActionsThreadId] = useState<string | null>(
-    null,
-  );
   const compact = useIsCompactViewport();
   const container = useRef<HTMLDivElement>(null);
   const focusTarget = useRef<string | null>(null);
-  const rowActionsFocusTarget = useRef<string | null>(null);
   const hiddenIds = useMemo(() => new Set(hidden), [hidden]);
   const groupsById = new Map(groups.map((group) => [group.id, group]));
   const orderedGroups = order.flatMap((id) => {
@@ -122,59 +112,11 @@ export function ThreadListVisibility({
     });
     return () => cancelAnimationFrame(frame);
   }, [hidden, customizing]);
-  useEffect(() => {
-    const threadId = rowActionsFocusTarget.current;
-    if (threadId === null || rowActionsThreadId !== null) return;
-    rowActionsFocusTarget.current = null;
-    let frame = requestAnimationFrame(() => {
-      frame = requestAnimationFrame(() => {
-        const link = Array.from(
-          container.current?.querySelectorAll<HTMLElement>(
-            "[data-sidebar-thread-id]",
-          ) ?? [],
-        ).find((element) => element.dataset.sidebarThreadId === threadId);
-        const target =
-          link
-            ?.closest("[data-sidebar-rename-row]")
-            ?.querySelector<HTMLElement>("[data-thread-actions-trigger]") ??
-          link ??
-          container.current;
-        target?.focus({ preventScroll: true });
-      });
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [rowActionsThreadId]);
-  const customizeRowActions = (threadId: string) => {
-    setRowActionsThreadId(threadId);
-  };
-  const finishCustomizingRowActions = useCallback(
-    (restoreFocus: boolean) => {
-      rowActionsFocusTarget.current = restoreFocus ? rowActionsThreadId : null;
-      setRowActionsThreadId(null);
-    },
-    [rowActionsThreadId],
-  );
-  useFinishRowActionsOnOutsideClick(
-    rowActionsThreadId === null ? null : finishCustomizingRowActions,
-  );
-  const rowActionsCustomizing = useMemo<ThreadRowActionsCustomizing | null>(
-    () =>
-      rowActionsThreadId === null
-        ? null
-        : {
-            threadId: rowActionsThreadId,
-            onDone: finishCustomizingRowActions,
-          },
-    [finishCustomizingRowActions, rowActionsThreadId],
-  );
   const value: ThreadListVisibilityState = {
     hiddenGroups: orderedGroups.filter((group) => hiddenIds.has(group.id)),
     label,
     selectedThreadId,
-    customize: () => {
-      setRowActionsThreadId(null);
-      setCustomizing("list");
-    },
+    customize: () => setCustomizing("list"),
     hide: (id) => {
       focusTarget.current = "more";
       setVisible(id, false);
@@ -186,44 +128,40 @@ export function ThreadListVisibility({
   };
   return (
     <VisibilityContext.Provider value={value}>
-      <CustomizeRowActionsContext.Provider value={customizeRowActions}>
-        <ThreadRowActionsCustomizingContext.Provider
-          value={rowActionsCustomizing}
-        >
-          <div ref={container} tabIndex={-1} className="min-w-0 outline-none">
-            {customizing === "list" ? (
-              <SidebarVisibilityCustomize
-                items={orderedGroups}
-                touchSensor={SidebarTouchSensor}
-                visibleIds={orderedGroups
-                  .filter((group) => !hiddenIds.has(group.id))
-                  .map((group) => group.id)}
-                onVisibleChange={setVisible}
-                onReorder={(activeId, overId) => {
-                  const groupIds = orderedGroups.map((group) => group.id);
-                  const next = reorderStoredOrder({
-                    activeId,
-                    overId,
-                    order: groupIds,
-                    visibleIds: groupIds,
-                  });
-                  if (next) onOrderChange(next);
-                }}
-                onDone={() => {
-                  focusTarget.current = "more";
-                  setCustomizing(null);
-                }}
-                title="Customize list"
-                listLabel={label}
-                variant={compact ? "compact" : "card"}
-                testIdPrefix="sidebar-thread-list"
-              />
-            ) : (
-              children
-            )}
-          </div>
-        </ThreadRowActionsCustomizingContext.Provider>
-      </CustomizeRowActionsContext.Provider>
+      <div ref={container} tabIndex={-1} className="min-w-0 outline-none">
+        {customizing === "list" ? (
+          <SidebarVisibilityCustomize
+            items={orderedGroups}
+            touchSensor={SidebarTouchSensor}
+            visibleIds={orderedGroups
+              .filter((group) => !hiddenIds.has(group.id))
+              .map((group) => group.id)}
+            onVisibleChange={setVisible}
+            onReorder={(activeId, overId) => {
+              const groupIds = orderedGroups.map((group) => group.id);
+              const next = reorderStoredOrder({
+                activeId,
+                overId,
+                order: groupIds,
+                visibleIds: groupIds,
+              });
+              if (next) onOrderChange(next);
+            }}
+            onDone={() => {
+              focusTarget.current = "more";
+              setCustomizing(null);
+            }}
+            title="Customize list"
+            listLabel={label}
+            variant={compact ? "compact" : "card"}
+            testIdPrefix="sidebar-thread-list"
+          />
+        ) : (
+          <ThreadRowActionsCustomizationScope containerRef={container}>
+            {children}
+          </ThreadRowActionsCustomizationScope>
+        )}
+      </div>
     </VisibilityContext.Provider>
   );
 }

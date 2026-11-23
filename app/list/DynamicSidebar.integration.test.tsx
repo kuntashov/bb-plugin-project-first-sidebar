@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useReducer, useState } from "react";
 import { createStore, Provider as JotaiProvider } from "jotai";
@@ -112,6 +112,7 @@ interface MountOptions {
   settings?: boolean;
   pendingPreferences?: Promise<void>;
   threadActions?: RenderSlotOptions["threadActions"];
+  threadActionRegistrations?: RenderSlotOptions["threadActionRegistrations"];
   sdk?: RenderSlotOptions["sdk"];
 }
 
@@ -126,6 +127,7 @@ async function mount({
   settings = false,
   pendingPreferences,
   threadActions,
+  threadActionRegistrations,
   sdk,
 }: MountOptions = {}) {
   const lifecycles: readonly SidebarLifecycle[] = ["active"];
@@ -227,6 +229,7 @@ async function mount({
       }),
     },
     threadActions,
+    threadActionRegistrations,
     sdk: quickSearch ? {
       subscribe: () => () => {},
       threads: { list: async () => [] },
@@ -269,6 +272,32 @@ async function mount({
 }
 
 describe("dynamic sidebar filters", () => {
+  it.each(["Все", "Все непрочитанные", "Ждут действия"])("customizes a row through its own menu in %s and restores focus", async (name) => {
+    const harness = await mount({
+      threads: [active],
+      preferences: { hiddenGroups: ["project:web"], collapsedProjects: ["web"], rowActions: [] },
+      threadActionRegistrations: [{ key: "bb--core/read", pluginId: "bb--core", title: "Mark read", icon: "Check" }],
+    });
+    fireEvent.click(radio(name));
+    const rowContainer = row()!.closest<HTMLElement>("[data-sidebar-rename-row]")!;
+    fireEvent.click(within(rowContainer).getByRole("button", { name: "Thread actions" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Customize actions" }));
+    const editor = await within(rowContainer).findByRole("group", { name: "Row actions" });
+    const firstSlot = within(editor).getByRole("button", { name: "Row action 1: Empty" });
+    await waitFor(() => expect(document.activeElement).toBe(firstSlot));
+    fireEvent.click(firstSlot);
+    fireEvent.click(await screen.findByRole("menuitemradio", { name: "Mark read" }));
+    expect(await within(editor).findByRole("button", { name: "Row action 3: Mark read" })).toBeTruthy();
+    fireEvent.click(within(editor).getByRole("button", { name: "Done" }));
+    expect(within(rowContainer).queryByRole("group", { name: "Row actions" })).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(within(rowContainer).getByRole("button", { name: "Thread actions" })));
+    expect(radio(name).getAttribute("aria-checked")).toBe("true");
+    await flushPreferenceWritesForTest();
+    expect(harness.getPreferenceWrites()).toEqual([
+      { method: "setPreference", input: { key: "rowActions", value: ["bb--core/read"] } },
+    ]);
+  });
+
   it.each(["Все непрочитанные", "Ждут действия"])("requests active highlights in Only archived and still runs row actions in %s", async (name) => {
     const markRead = vi.fn();
     const restore = vi.fn();
@@ -407,6 +436,44 @@ describe("dynamic sidebar filters", () => {
     await flushPreferenceWritesForTest();
     expect(harness.getPreferenceWrites()).toEqual([]);
     expect(harness.view.inspection.sdkCalls).toEqual([]);
+  });
+
+  it("stops ordinary mutations when a match appears during an authorized ancestor update", async () => {
+    const parent = makeSidebarThread({ id: "hidden-parent", projectId: "app", isHidden: true });
+    const child = { ...active, parentThreadId: parent.id, hasPendingInteraction: false };
+    let finishUpdate!: () => void;
+    const pendingUpdate = new Promise<void>((resolve) => { finishUpdate = resolve; });
+    const update = vi.fn(async () => {
+      await pendingUpdate;
+      return makeSearchThread({ id: parent.id, projectId: parent.projectId, visibility: "visible" });
+    });
+    const harness = await mount({
+      threads: [parent, child],
+      preferences: { hiddenGroups: ["project:app"] },
+      sdk: { threads: { update } },
+    });
+    fireEvent.click(radio("Ждут действия"));
+    await act(async () => requestThreadReveal(child.id));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog.textContent).toContain("Группа скрыта");
+    expect(dialog.textContent).toContain("предки имеют статус «скрытый»");
+    fireEvent.click(screen.getByRole("button", { name: "Показать в дереве" }));
+    await waitFor(() => expect(update).toHaveBeenCalledExactlyOnceWith({ threadId: parent.id, visibility: "visible" }));
+
+    const matchingChild = { ...child, hasPendingInteraction: true };
+    harness.setActiveSnapshot([parent, matchingChild]);
+    const dynamicRow = row(child.id);
+    expect(dynamicRow?.closest('[data-sidebar-dynamic-filter="waiting-for-action"]')).not.toBeNull();
+    await act(async () => {
+      harness.setActiveSnapshot([{ ...parent, isHidden: false }, matchingChild]);
+      finishUpdate();
+    });
+    await waitFor(() => expect(document.activeElement).toBe(dynamicRow));
+    expect(dynamicRow?.hasAttribute("data-project-first-reveal-highlight")).toBe(true);
+    expect(radio("Ждут действия").getAttribute("aria-checked")).toBe("true");
+    await flushPreferenceWritesForTest();
+    expect(harness.getPreferenceWrites()).toEqual([]);
+    expect(update).toHaveBeenCalledOnce();
   });
 
   it("follows an explicit project destination even when the thread starts matching while the dialog is open", async () => {

@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
 import { useIsCompactViewport } from "@/components/ui/hooks/use-compact-viewport";
 import { DYNAMIC_FILTERS, type DynamicFilterId } from "../filters/dynamic-filter-ids.js";
 import type { DynamicSidebarProjection } from "../model/dynamic-sidebar-projection.js";
@@ -8,6 +8,7 @@ import { useSidebarRenameState } from "../rows/SidebarInlineRename.js";
 import { ThreadRow, type ThreadRowOptions } from "../rows/ThreadRow.js";
 import { SidebarMenuSkeleton } from "../ui/sidebar.js";
 import { SidebarWindowedItems } from "./SidebarWindowedItems.js";
+import { ThreadRowActionsCustomizationScope } from "./ThreadRowActionsCustomize.js";
 
 type DynamicSidebarItem =
   | { kind: "heading"; key: string; name: string }
@@ -39,6 +40,7 @@ export function DynamicSidebarList({ filterId, activeThreadId, onProjectSelect }
 }) {
   const { status, projection } = useDynamicSidebar(filterId);
   const rename = useSidebarRenameState();
+  const containerRef = useRef<HTMLDivElement>(null);
   const renamingThreadId = rename?.kind === "thread" ? rename.id : null;
   const isCompact = useIsCompactViewport();
   const options = useMemo<ThreadRowOptions>(() => ({ kind: "default", depth: 0, isCompact }), [isCompact]);
@@ -51,43 +53,45 @@ export function DynamicSidebarList({ filterId, activeThreadId, onProjectSelect }
   const filter = DYNAMIC_FILTERS[filterId];
 
   return (
-    <div data-sidebar-dynamic-filter={filter.key} className="min-w-0 px-2">
-      {status === "loading" ? (
-        <div aria-label="Загрузка тредов" role="status">
-          <SidebarMenuSkeleton />
-          <SidebarMenuSkeleton />
-        </div>
-      ) : status === "error" ? (
-        <p className="p-2 text-sm text-muted-foreground" role="alert">Не удалось загрузить активные треды</p>
-      ) : items.length === 0 ? (
-        <p className="p-2 text-sm text-muted-foreground" role="status">{filter.emptyMessage}</p>
-      ) : (
-        <SidebarWindowedItems
-          itemKeys={itemKeys}
-          alwaysMountedKeys={alwaysMountedKeys}
-          estimateRows={() => 1}
-          getNavigationEntries={(index) => {
-            const item = items[index]!;
-            return item.kind === "thread" ? [{ threadId: item.thread.id, projectId: item.thread.projectId }] : [];
-          }}
-          renderItem={(index) => {
-            const item = items[index]!;
-            if (item.kind === "heading") {
-              return <h2 className="flex h-7 items-center truncate px-1 text-xs font-medium text-sidebar-foreground/75">{item.name}</h2>;
-            }
-            const { thread, projectId } = item;
-            return (
-              <ThreadRow
-                thread={thread}
-                crossProjectId={thread.projectId === projectId ? null : thread.projectId}
-                isActive={activeThreadId === thread.id}
-                onProjectSelect={onProjectSelect}
-                options={options}
-              />
-            );
-          }}
-        />
-      )}
+    <div ref={containerRef} data-sidebar-dynamic-filter={filter.key} tabIndex={-1} className="min-w-0 px-2 outline-none">
+      <ThreadRowActionsCustomizationScope containerRef={containerRef}>
+        {status === "loading" ? (
+          <div aria-label="Загрузка тредов" role="status">
+            <SidebarMenuSkeleton />
+            <SidebarMenuSkeleton />
+          </div>
+        ) : status === "error" ? (
+          <p className="p-2 text-sm text-muted-foreground" role="alert">Не удалось загрузить активные треды</p>
+        ) : items.length === 0 ? (
+          <p className="p-2 text-sm text-muted-foreground" role="status">{filter.emptyMessage}</p>
+        ) : (
+          <SidebarWindowedItems
+            itemKeys={itemKeys}
+            alwaysMountedKeys={alwaysMountedKeys}
+            estimateRows={() => 1}
+            getNavigationEntries={(index) => {
+              const item = items[index]!;
+              return item.kind === "thread" ? [{ threadId: item.thread.id, projectId: item.thread.projectId }] : [];
+            }}
+            renderItem={(index) => {
+              const item = items[index]!;
+              if (item.kind === "heading") {
+                return <h2 className="flex h-7 items-center truncate px-1 text-xs font-medium text-sidebar-foreground/75">{item.name}</h2>;
+              }
+              const { thread, projectId } = item;
+              return (
+                <ThreadRow
+                  thread={thread}
+                  crossProjectId={thread.projectId === projectId ? null : thread.projectId}
+                  isActive={activeThreadId === thread.id}
+                  onProjectSelect={onProjectSelect}
+                  options={options}
+                />
+              );
+            }}
+          />
+        )}
+      </ThreadRowActionsCustomizationScope>
     </div>
   );
 }

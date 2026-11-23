@@ -1,9 +1,12 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent,
+  type ReactNode,
+  type RefObject,
 } from "react";
 import { closestCenter, DndContext, type DragEndEvent } from "@dnd-kit/core";
 import {
@@ -33,6 +36,11 @@ import { useSidebarReorderDnd } from "@/components/ui/use-sidebar-reorder-dnd";
 import { SidebarTouchSensor } from "../dnd/sidebarTouchSensor.js";
 import { useSidebarSortable } from "@/components/ui/sortable-motion";
 import { SIDEBAR_CONTROL_BUTTON_CLASS } from "@/components/ui/sidebar-row-classes";
+import {
+  CustomizeRowActionsContext,
+  ThreadRowActionsCustomizingContext,
+  type ThreadRowActionsCustomizing,
+} from "./customizeRowActionsContext.js";
 
 type RowActionSlot = string | null;
 
@@ -62,6 +70,53 @@ export function assignRowActionSlot(
 const CUSTOMIZE_ATTRIBUTE = "data-row-actions-customize";
 const CUSTOMIZE_SELECTOR = `[${CUSTOMIZE_ATTRIBUTE}]`;
 const SLOT_SELECTOR = "[data-sidebar-customize-launch]";
+
+export function ThreadRowActionsCustomizationScope({
+  containerRef,
+  children,
+}: {
+  containerRef: RefObject<HTMLElement | null>;
+  children: ReactNode;
+}) {
+  const [threadId, setThreadId] = useState<string | null>(null);
+  const focusThreadId = useRef<string | null>(null);
+  const finish = useCallback((restoreFocus: boolean) => {
+    focusThreadId.current = restoreFocus ? threadId : null;
+    setThreadId(null);
+  }, [threadId]);
+  useFinishRowActionsOnOutsideClick(threadId === null ? null : finish);
+
+  useEffect(() => {
+    const id = focusThreadId.current;
+    if (id === null || threadId !== null) return;
+    focusThreadId.current = null;
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => {
+        const root = containerRef.current;
+        const link = Array.from(
+          root?.querySelectorAll<HTMLElement>("[data-sidebar-thread-id]") ?? [],
+        ).find((element) => element.dataset.sidebarThreadId === id);
+        const target =
+          link?.closest("[data-sidebar-rename-row]")
+            ?.querySelector<HTMLElement>("[data-thread-actions-trigger]") ?? link ?? root;
+        target?.focus({ preventScroll: true });
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [containerRef, threadId]);
+
+  const customizing = useMemo<ThreadRowActionsCustomizing | null>(
+    () => threadId === null ? null : { threadId, onDone: finish },
+    [finish, threadId],
+  );
+  return (
+    <CustomizeRowActionsContext.Provider value={setThreadId}>
+      <ThreadRowActionsCustomizingContext.Provider value={customizing}>
+        {children}
+      </ThreadRowActionsCustomizingContext.Provider>
+    </CustomizeRowActionsContext.Provider>
+  );
+}
 
 export function focusFirstRowActionSlot(root: Element | null | undefined) {
   root

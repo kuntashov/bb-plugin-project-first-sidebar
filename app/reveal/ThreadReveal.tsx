@@ -194,6 +194,7 @@ export function ThreadReveal() {
         for (const id of plan.hiddenThreadIds) {
           signal.throwIfAborted();
           await sdk.threads.update({ threadId: id, visibility: "visible" });
+          if (dynamicId && await revealDynamicMatch(root, dynamicId, threadId, signal)) return;
         }
         signal.throwIfAborted();
         if (plan.missingLifecycle) {
