@@ -59,7 +59,7 @@ const preferenceValuesSchema = z.object(
 );
 
 const threadListPreferencesResponseSchema = z.strictObject({
-  preferences: z.strictObject(
+  preferences: z.object(
     Object.fromEntries(
       THREAD_LIST_PREFERENCE_KEYS.map((key) => [key, preferenceDefinitions[key].schema]),
     ) as Pick<typeof preferenceValuesSchema.shape, (typeof THREAD_LIST_PREFERENCE_KEYS)[number]>,

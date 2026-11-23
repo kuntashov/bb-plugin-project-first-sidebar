@@ -6,7 +6,7 @@ export const PROJECTLESS_FILTER_ID = BUILT_IN_FILTER_IDS[1];
 
 export type BuiltInFilterId = typeof ALL_FILTER_ID | typeof PROJECTLESS_FILTER_ID;
 
-function isBuiltInFilterId(id: ActiveFilterId): id is BuiltInFilterId {
+export function isBuiltInFilterId(id: ActiveFilterId): id is BuiltInFilterId {
   return id === ALL_FILTER_ID || id === PROJECTLESS_FILTER_ID;
 }
 
@@ -20,6 +20,7 @@ export interface FilterListRpc {
 export interface WindowFilterSnapshot {
   activeFilterId: ActiveFilterId;
   hiddenBuiltInFilterIds: ReadonlySet<BuiltInFilterId>;
+  builtInVisibilityReady: boolean;
   document: FilterDocumentV1 | null;
   status: "loading" | "ready" | "error";
   isRefreshing: boolean;
@@ -34,6 +35,7 @@ export interface WindowFilterStore {
   subscribe(listener: () => void): () => void;
   setActiveFilterId(filterId: ActiveFilterId): void;
   setBuiltInFilterVisible(filterId: BuiltInFilterId, visible: boolean): void;
+  setBuiltInVisibilityReady(ready: boolean): void;
   isFilterAvailable(filterId: ActiveFilterId): boolean;
   invalidate(): void;
   reconnect(): void;
@@ -44,10 +46,13 @@ function describeReadError(result: Extract<FilterReadResult, { status: "error" }
   return detail ? `Could not load project filters: ${detail}` : "Could not load project filters.";
 }
 
-export function createWindowFilterStore(): WindowFilterStore {
+export function createWindowFilterStore({
+  builtInVisibilityReady = true,
+}: { builtInVisibilityReady?: boolean } = {}): WindowFilterStore {
   let snapshot: WindowFilterSnapshot = {
     activeFilterId: ALL_FILTER_ID,
     hiddenBuiltInFilterIds: new Set(),
+    builtInVisibilityReady,
     document: null,
     status: "loading",
     isRefreshing: false,
@@ -71,10 +76,13 @@ export function createWindowFilterStore(): WindowFilterStore {
     listeners.forEach((listener) => listener());
   };
 
-  const isFilterAvailable = (filterId: ActiveFilterId): boolean =>
-    isBuiltInFilterId(filterId)
-      ? !snapshot.hiddenBuiltInFilterIds.has(filterId)
-      : snapshot.document?.filters.some((filter) => filter.id === filterId) ?? false;
+  const isFilterAvailable = (filterId: ActiveFilterId): boolean => {
+    if (filterId === ALL_FILTER_ID) return true;
+    if (isBuiltInFilterId(filterId)) {
+      return snapshot.builtInVisibilityReady && !snapshot.hiddenBuiltInFilterIds.has(filterId);
+    }
+    return snapshot.document?.filters.some((filter) => filter.id === filterId) ?? false;
+  };
 
   const applyDocument = (
     document: FilterDocumentV1,
@@ -202,8 +210,16 @@ export function createWindowFilterStore(): WindowFilterStore {
       return () => listeners.delete(listener);
     },
     isFilterAvailable,
+    setBuiltInVisibilityReady(ready) {
+      if (snapshot.builtInVisibilityReady === ready) return;
+      publish({
+        ...snapshot,
+        builtInVisibilityReady: ready,
+        activeFilterId: !ready && isBuiltInFilterId(snapshot.activeFilterId) ? ALL_FILTER_ID : snapshot.activeFilterId,
+      });
+    },
     setBuiltInFilterVisible(filterId, visible) {
-      if (filterId === ALL_FILTER_ID || isFilterAvailable(filterId) === visible) return;
+      if (filterId === ALL_FILTER_ID || snapshot.hiddenBuiltInFilterIds.has(filterId) === !visible) return;
       const hiddenBuiltInFilterIds = new Set(snapshot.hiddenBuiltInFilterIds);
       if (visible) hiddenBuiltInFilterIds.delete(filterId);
       else hiddenBuiltInFilterIds.add(filterId);
@@ -226,4 +242,4 @@ export function createWindowFilterStore(): WindowFilterStore {
   };
 }
 
-export const windowFilterStore = createWindowFilterStore();
+export const windowFilterStore = createWindowFilterStore({ builtInVisibilityReady: false });

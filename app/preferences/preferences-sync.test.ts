@@ -222,6 +222,32 @@ describe("preferences sync", () => {
     },
   );
 
+  it.each(["showProjectlessFilter", "showUnreadFilter", "showWaitingForActionFilter"] as const)(
+    "keeps an accepted realtime update to %s across an older hydration",
+    async (key) => {
+      const store = getDefaultStore();
+      const visibility = createSyncedPreferenceAtom(key);
+      const sort = createSyncedPreferenceAtom("chronologicalSort");
+      let resolveRead!: (value: unknown) => void;
+      const hydrating = hydratePreferences({
+        call: () => new Promise((resolve) => { resolveRead = resolve; }),
+      });
+      applyRemotePreferenceSignal({ key, value: false });
+      applyRemotePreferenceSignal({ key: "chronologicalSort", value: "invalid" });
+      expect(store.get(visibility)).toBe(false);
+
+      resolveRead({ preferences: { ...defaultPreferences(), chronologicalSort: "alpha" } });
+      await hydrating;
+      expect(store.get(visibility)).toBe(false);
+      expect(store.get(sort)).toBe("alpha");
+      expect(JSON.parse(mirror.getItem(MIRROR_KEY) ?? "{}")[key]).toBe(false);
+      expect(store.get(preferencesReadyAtom())).toBe(true);
+
+      await hydratePreferences(fakeRpc({ [key]: true }));
+      expect(store.get(visibility)).toBe(true);
+    },
+  );
+
   it("does not write back a value that did not change", async () => {
     const rpc = fakeRpc();
     await hydratePreferences(rpc);

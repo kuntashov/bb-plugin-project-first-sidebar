@@ -29,7 +29,7 @@ export interface PreferencesRpc {
 interface SyncState {
   valueAtoms: Map<PreferenceKey, PrimitiveAtom<unknown>>;
   readyAtom: PrimitiveAtom<boolean>;
-  localWriteVersions: Map<PreferenceKey, number>;
+  preferenceVersions: Map<PreferenceKey, number>;
   pendingWrites: Map<
     PreferenceKey,
     {
@@ -48,7 +48,7 @@ function createSyncState(): SyncState {
   return {
     valueAtoms: new Map(),
     readyAtom: atom(false),
-    localWriteVersions: new Map(),
+    preferenceVersions: new Map(),
     pendingWrites: new Map(),
     rpc: null,
     store: null,
@@ -165,7 +165,7 @@ export function setPreferencesMirrorStorageForTest(
 
 function applyValues(
   values: Partial<PreferenceValues>,
-  writeVersionsAtRead?: ReadonlyMap<PreferenceKey, number>,
+  versionsAtRead?: ReadonlyMap<PreferenceKey, number>,
 ): void {
   const store = activeStore();
   for (const key of PREFERENCE_KEYS) {
@@ -173,8 +173,8 @@ function applyValues(
     if (value === undefined) continue;
     if (state.pendingWrites.has(key)) continue;
     if (
-      writeVersionsAtRead !== undefined &&
-      writeVersionsAtRead.get(key) !== (state.localWriteVersions.get(key) ?? 0)
+      versionsAtRead !== undefined &&
+      versionsAtRead.get(key) !== (state.preferenceVersions.get(key) ?? 0)
     ) {
       continue;
     }
@@ -192,9 +192,9 @@ export function hydratePreferencesFromMirror(): boolean {
 export async function hydratePreferences(rpc: PreferencesRpc): Promise<void> {
   state.rpc = rpc;
   const generation = ++state.hydrateGeneration;
-  const writeVersionsAtRead = new Map(
+  const versionsAtRead = new Map(
     PREFERENCE_KEYS.filter((key) => !state.pendingWrites.has(key)).map(
-      (key) => [key, state.localWriteVersions.get(key) ?? 0],
+      (key) => [key, state.preferenceVersions.get(key) ?? 0],
     ),
   );
   const response = await rpc.call("listPreferences", null);
@@ -215,7 +215,7 @@ export async function hydratePreferences(rpc: PreferencesRpc): Promise<void> {
       }
     }
   }
-  applyValues({ ...defaultPreferences(), ...values }, writeVersionsAtRead);
+  applyValues({ ...defaultPreferences(), ...values }, versionsAtRead);
   writeMirror(mirrorStorage());
   activeStore().set(state.readyAtom, true);
 }
@@ -225,8 +225,9 @@ export function applyRemotePreferenceSignal(payload: unknown): void {
   if (!parsed.success) return;
   const { key, value } = parsed.data;
   const result = parseStoredPreferenceValue(key, value);
-  if (!result.success) return;
-  applyValues({ [key]: result.value } as Partial<PreferenceValues>);
+  if (!result.success || state.pendingWrites.has(key)) return;
+  advancePreferenceVersion(key);
+  activeStore().set(valueAtomFor(key), result.value);
   writeMirror(mirrorStorage());
 }
 
@@ -261,11 +262,15 @@ function flushWrite(key: PreferenceKey): void {
     });
 }
 
+function advancePreferenceVersion(key: PreferenceKey): void {
+  state.preferenceVersions.set(key, (state.preferenceVersions.get(key) ?? 0) + 1);
+}
+
 export function schedulePreferenceWrite(
   key: PreferenceKey,
   value: unknown,
 ): void {
-  state.localWriteVersions.set(key, (state.localWriteVersions.get(key) ?? 0) + 1);
+  advancePreferenceVersion(key);
   writeMirror(mirrorStorage());
   let pending = state.pendingWrites.get(key);
   if (pending === undefined) {
@@ -293,7 +298,7 @@ export function resetPreferencesSyncForTest(): void {
     if (pending.timer !== null) clearTimeout(pending.timer);
   }
   state.pendingWrites.clear();
-  state.localWriteVersions.clear();
+  state.preferenceVersions.clear();
   state.rpc = null;
   state.hydrateGeneration += 1;
   const store = activeStore();

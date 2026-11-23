@@ -235,6 +235,22 @@ describe("project filter panel", () => {
     await waitFor(() => expect(read).toBe(3));
   });
 
+  it("keeps selection without refocusing All when a different focused custom filter is deleted", async () => {
+    const store = createWindowFilterStore();
+    let document = success(1, [{ id: "active", name: "Active" }, { id: "removed", name: "Removed" }]);
+    const slot = renderSlot({ component: ProjectFilterPanel }, { store }, {
+      rpc: { listFilters: () => document },
+    });
+    const active = await screen.findByRole("radio", { name: "Active" });
+    fireEvent.click(active);
+    screen.getByRole("radio", { name: "Removed" }).focus();
+    document = success(2, [{ id: "active", name: "Active" }]);
+    await slot.behavior.emitRealtime(FILTERS_CHANGED_CHANNEL, { revision: 2 });
+    await waitFor(() => expect(screen.queryByRole("radio", { name: "Removed" })).toBeNull());
+    expect(active.getAttribute("aria-checked")).toBe("true");
+    expect(window.document.activeElement).not.toBe(screen.getByRole("radio", { name: "Все" }));
+  });
+
   it("shows loading/read errors and only renders a functioning management trigger", async () => {
     let rejectRead!: (error: Error) => void;
     const pending = new Promise<FilterReadResult>((_resolve, reject) => {

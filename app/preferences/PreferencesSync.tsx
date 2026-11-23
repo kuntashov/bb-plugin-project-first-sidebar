@@ -35,8 +35,15 @@ export function usePreferencesSync(): void {
       const updateFilterVisibility = () => {
         windowFilterStore.setBuiltInFilterVisible(PROJECTLESS_FILTER_ID, store.get(sidebarShowProjectlessFilterAtom));
       };
-      unsubscribeVisibility = store.sub(sidebarShowProjectlessFilterAtom, updateFilterVisibility);
+      const readyAtom = preferencesReadyAtom();
+      const updateVisibilityReadiness = () => {
+        windowFilterStore.setBuiltInVisibilityReady(store.get(readyAtom));
+      };
+      const stopVisibility = store.sub(sidebarShowProjectlessFilterAtom, updateFilterVisibility);
+      const stopReadiness = store.sub(readyAtom, updateVisibilityReadiness);
+      unsubscribeVisibility = () => { stopVisibility(); stopReadiness(); };
       updateFilterVisibility();
+      updateVisibilityReadiness();
       hydratePreferencesFromMirror();
       void hydratePreferences(rpc).catch((error: unknown) => {
         console.warn(

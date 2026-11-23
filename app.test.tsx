@@ -317,6 +317,37 @@ describe("project-first-sidebar plugin", () => {
     expect(document.activeElement).toBe(screen.getByRole("radio", { name: "Все" }));
   });
 
+  it.each([false, true])("waits for the initial visibility response before admitting the personal filter (%s)", async (visible) => {
+    setPreferencesMirrorStorageForTest(null);
+    let finishRead!: (value: { preferences: PreferenceValues }) => void;
+    const response = new Promise<{ preferences: PreferenceValues }>((resolve) => { finishRead = resolve; });
+    renderSlot(registration, props(), {
+      rpc: {
+        listPreferences: () => response,
+        listFilters: () => ({ status: "success", document: {
+          ...defaultFilterDocument(), revision: (windowFilterStore.getSnapshot().document?.revision ?? 0) + 1,
+          filters: [{ id: "other", name: "Work filter", rule: { kind: "projectIds", projectIds: [] } }],
+        } }),
+      },
+    });
+    const all = await screen.findByRole("radio", { name: "Все" });
+    const custom = await screen.findByRole("radio", { name: "Work filter" });
+    fireEvent.click(all);
+    expect(screen.queryByRole("radio", { name: "Без проектов" })).toBeNull();
+    act(() => windowFilterStore.setActiveFilterId("projectless"));
+    expect(all.getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(custom);
+    expect(custom.getAttribute("aria-checked")).toBe("true");
+    await act(async () => finishRead({ preferences: { ...defaultPreferences(), showProjectlessFilter: visible } }));
+    act(() => windowFilterStore.setActiveFilterId("projectless"));
+    if (visible) {
+      expect(screen.getByRole("radio", { name: "Без проектов" }).getAttribute("aria-checked")).toBe("true");
+    } else {
+      expect(screen.queryByRole("radio", { name: "Без проектов" })).toBeNull();
+      expect(custom.getAttribute("aria-checked")).toBe("true");
+    }
+  });
+
   it("shows the navigation skeleton until preferences load", () => {
     setPreferencesMirrorStorageForTest(null);
     renderSlot(registration, props(), {

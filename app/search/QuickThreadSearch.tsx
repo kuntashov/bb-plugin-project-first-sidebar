@@ -55,8 +55,8 @@ function SearchSession({ prepare, accept, close }: {
   const [scrollTop, setScrollTop] = useState(0);
   const listId = useId();
   const source = useSearchData(includeArchived);
-  const { document, hiddenBuiltInFilterIds } = snapshot;
-  const showProjectless = !hiddenBuiltInFilterIds.has(PROJECTLESS_FILTER_ID);
+  const { document } = snapshot;
+  const showProjectless = windowFilterStore.isFilterAvailable(PROJECTLESS_FILTER_ID);
   const filters = useMemo<Array<{ id: string; name: string; icon?: IconDefinition }>>(() => [
     { id: ALL_FILTER_ID, name: "Все" },
     ...(showProjectless ? [{ id: PROJECTLESS_FILTER_ID, name: "Без проектов", icon: { kind: "builtin" as const, name: "Folder" as const } }] : []),

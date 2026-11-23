@@ -106,6 +106,26 @@ async function choosePersonalFilter() {
 }
 
 describe("keyboard quick navigation", () => {
+  it.each([false, true])("waits for the initial visibility response before offering the personal filter (%s)", async (visible) => {
+    type Response = { preferences: ReturnType<typeof defaultPreferences> };
+    let finishRead!: (value: Response) => void;
+    const response = new Promise<Response>((resolve) => { finishRead = resolve; });
+    await mount({
+      rpc: {
+        listPreferences: () => response,
+        listFilters: () => ({ status: "success", document: {
+          ...defaultFilterDocument(), revision: (windowFilterStore.getSnapshot().document?.revision ?? 0) + 1,
+          filters: [{ id: "work", name: "Рабочие", rule: { kind: "projectIds", projectIds: ["app"] } }],
+        } }),
+      },
+    });
+    expect(screen.getByRole("option", { name: "Все" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: "Рабочие" })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: "Без проектов" })).toBeNull();
+    await act(async () => finishRead({ preferences: { ...defaultPreferences(), showProjectlessFilter: visible } }));
+    expect(screen.queryByRole("option", { name: "Без проектов" }) !== null).toBe(visible);
+  });
+
   it("returns to filter choice and aborts an in-flight personal search when the filter is hidden", async () => {
     const target = entry({ id: "personal-thread", projectId: "personal", title: "Личный тред" });
     let resolveTarget!: (row: ReturnType<typeof makeThreadResponse>) => void;

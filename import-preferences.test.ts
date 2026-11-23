@@ -43,9 +43,12 @@ function setup(options: { absent?: boolean; disabled?: boolean; response?: unkno
 }
 
 describe("thread-list effective preferences snapshot", () => {
-  it("imports source defaults, preserves own settings and remaps only the normalized move key", async () => {
+  it.each([
+    ["0.46.1", threadListPreferences],
+    ["0.48.1", { ...threadListPreferences, showRowMetadata: true }],
+  ] as const)("imports the Thread-list %s response and preserves own settings", async (_version, source) => {
     const { bb, callRpc } = setup({ response: { preferences: {
-      ...threadListPreferences, organizationMode: "machine", rowActions: ["move", "core/pin", "other/move"],
+      ...source, organizationMode: "machine", rowActions: ["move", "core/pin", "other/move"],
     } } });
     await bb.storage.kv.set(`${PREFIX}hiddenGroups`, ["project:mine"]);
     await bb.storage.kv.set(`${PREFIX}showExecutionHighlighting`, true);
@@ -55,7 +58,7 @@ describe("thread-list effective preferences snapshot", () => {
     expect(result.imported).toEqual(Object.keys(threadListPreferences).filter((key) => key !== "hiddenGroups"));
     await expect(bb.storage.kv.get(`${PREFIX}showExecutionHighlighting`)).resolves.toBe(true);
     await expect(bb.storage.kv.get(`${PREFIX}showProjectlessFilter`)).resolves.toBe(false);
-    for (const key of ["showUnreadFilter", "showWaitingForActionFilter"]) {
+    for (const key of ["showUnreadFilter", "showWaitingForActionFilter", "showRowMetadata"]) {
       await expect(bb.storage.kv.get(PREFIX + key)).resolves.toBeUndefined();
     }
     await expect(bb.storage.kv.get(`${PREFIX}organizationMode`)).resolves.toBe("machine");
@@ -82,7 +85,6 @@ describe("thread-list effective preferences snapshot", () => {
     { fail: "rpc", state: "failed" },
     { response: { preferences: { ...threadListPreferences, collapsedMachines: false } }, state: "failed" },
     { response: { preferences: { organizationMode: "machine" } }, state: "failed" },
-    { response: { preferences: { ...threadListPreferences, showUnreadFilter: true } }, state: "failed" },
   ])("distinguishes missing source and failures without committing a marker: %j", async ({ state, ...options }) => {
     const { bb } = setup(options);
     const result = await importThreadListPreferences(bb);

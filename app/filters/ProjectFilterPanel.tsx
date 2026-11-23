@@ -17,6 +17,7 @@ import { cn } from "@/lib/utils";
 import {
   ALL_FILTER_ID,
   PROJECTLESS_FILTER_ID,
+  isBuiltInFilterId,
   windowFilterStore,
   type ActiveFilterId,
   type BuiltInFilterId,
@@ -48,7 +49,7 @@ export function ProjectFilterPanel({
   useFilterDocumentSync(store);
   const snapshot = useWindowFilterSnapshot(store);
   const options: FilterOption[] = [
-    ...BUILT_IN_FILTERS.filter(({ id }) => !snapshot.hiddenBuiltInFilterIds.has(id)),
+    ...BUILT_IN_FILTERS.filter(({ id }) => store.isFilterAvailable(id)),
     ...(snapshot.document?.filters.map((filter) => ({
       id: filter.id,
       name: filter.name,
@@ -62,10 +63,15 @@ export function ProjectFilterPanel({
   const radioRefs = useRef(new Map<ActiveFilterId, HTMLButtonElement>());
   const groupRef = useRef<HTMLDivElement>(null);
   const focusedFilterId = useRef<ActiveFilterId | null>(null);
+  const handledRemovalVersion = useRef(snapshot.removalVersion);
 
   useLayoutEffect(() => {
+    const activeWasRemoved = snapshot.removalVersion !== handledRemovalVersion.current;
+    handledRemovalVersion.current = snapshot.removalVersion;
     const focusedId = focusedFilterId.current;
-    if (focusedId !== null && !radioRefs.current.has(focusedId)) {
+    if (focusedId === null || radioRefs.current.has(focusedId)) return;
+    if ((activeWasRemoved && focusedId === snapshot.removedActiveFilterId)
+      || (isBuiltInFilterId(focusedId) && !store.isFilterAvailable(focusedId))) {
       radioRefs.current.get(ALL_FILTER_ID)?.focus();
     }
   });
