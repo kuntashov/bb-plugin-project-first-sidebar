@@ -1,4 +1,10 @@
 export const REVEAL_ROOT_SELECTOR = "[data-project-first-sidebar]";
+const CLOSED_SIDEBAR_SELECTOR = '[inert], [data-sidebar="panel"][data-state="closed"]';
+const HIDDEN_ROW_SELECTOR = `${CLOSED_SIDEBAR_SELECTOR}, [data-sidebar-overflow]`;
+
+function isOpenSidebarRoot(root: HTMLElement): boolean {
+  return root.isConnected && root.closest(CLOSED_SIDEBAR_SELECTOR) === null;
+}
 
 // Waits are cancellable, including between archive pages and React commits.
 export function waitForReveal<T>(read: () => T | null | undefined | false, signal: AbortSignal, timeout = 5000): Promise<T> {
@@ -26,7 +32,7 @@ export async function openRevealSidebar(signal: AbortSignal): Promise<HTMLElemen
   if (trigger?.getAttribute("aria-expanded") === "false") trigger.click();
   return waitForReveal(() => {
     const root = document.querySelector<HTMLElement>(REVEAL_ROOT_SELECTOR);
-    return root && !root.closest('[inert], [data-sidebar="panel"][data-state="closed"]') && root;
+    return root && isOpenSidebarRoot(root) && root;
   }, signal).catch((error: unknown) => {
     if (signal.aborted) throw error;
     throw new Error("Откройте Project-first sidebar: выберите его поставщиком списка в настройках BB.");
@@ -35,27 +41,31 @@ export async function openRevealSidebar(signal: AbortSignal): Promise<HTMLElemen
 
 export function findThreadRow(root: HTMLElement, id: string): HTMLElement | undefined {
   return Array.from(root.querySelectorAll<HTMLElement>("a[data-sidebar-thread-id]"))
-    .find((row) => row.dataset.sidebarThreadId === id && !row.closest('[inert], [data-sidebar-overflow]'));
+    .find((row) => row.dataset.sidebarThreadId === id && row.closest(HIDDEN_ROW_SELECTOR) === null);
 }
 
 export function positionRevealThread(
-  root: HTMLElement,
+  rootOrReadRoot: HTMLElement | (() => HTMLElement | null),
   threadId: string,
   signal: AbortSignal,
-  canPosition?: () => boolean,
 ): Promise<HTMLElement> {
   return waitForReveal(() => {
-    if (canPosition && !canPosition()) return null;
+    const root = typeof rootOrReadRoot === "function" ? rootOrReadRoot() : rootOrReadRoot;
+    if (!root || !isOpenSidebarRoot(root)) return null;
     const target = findThreadRow(root, threadId);
     if (target) {
       target.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
       signal.throwIfAborted();
+      if (!root.contains(target) || !isOpenSidebarRoot(target)) return null;
       target.focus({ preventScroll: true });
-      return target;
+      signal.throwIfAborted();
+      return root.contains(target) && isOpenSidebarRoot(target)
+        && target.ownerDocument.activeElement === target ? target : null;
     }
     // Placeholders carry the same navigation entries as keyboard traversal.
     const placeholder = Array.from(root.querySelectorAll<HTMLElement>("[data-sidebar-windowed-nav]"))
-      .find((item) => item.dataset.sidebarWindowedNav?.split(" ").some((entry) => entry.split(":")[0] === threadId));
+      .find((item) => item.closest(HIDDEN_ROW_SELECTOR) === null
+        && item.dataset.sidebarWindowedNav?.split(" ").some((entry) => entry.split(":")[0] === threadId));
     placeholder?.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
     return null;
   }, signal);

@@ -50,21 +50,30 @@ const BUILT_IN_FILTERS: readonly BuiltInFilterOption[] = [
     icon: { kind: "builtin", name: DYNAMIC_FILTERS[id].icon },
   })),
 ];
-const builtInNameKeys = new Set(BUILT_IN_FILTERS.map(({ name }) => filterNameKey(name)));
-
 export function ProjectFilterPanel({
   store = windowFilterStore,
   onManageFilters,
 }: ProjectFilterPanelProps) {
   useFilterDocumentSync(store);
   const snapshot = useWindowFilterSnapshot(store);
+  const builtIns = BUILT_IN_FILTERS.filter(({ id }) => store.isFilterAvailable(id));
+  const customFilters = snapshot.document?.filters ?? [];
+  const builtInNames = new Set(builtIns.map(({ name }) => filterNameKey(name)));
+  const usedNames = new Set([...builtInNames, ...customFilters.map(({ name }) => filterNameKey(name))]);
   const options: FilterOption[] = [
-    ...BUILT_IN_FILTERS.filter(({ id }) => store.isFilterAvailable(id)),
-    ...(snapshot.document?.filters.map((filter) => ({
-      id: filter.id,
-      name: builtInNameKeys.has(filterNameKey(filter.name)) ? `${filter.name} (пользовательский фильтр)` : filter.name,
-      icon: filter.icon ?? DEFAULT_FILTER_ICON,
-    })) ?? []),
+    ...builtIns,
+    ...customFilters.map((filter) => {
+      let { name } = filter;
+      if (builtInNames.has(filterNameKey(name))) {
+        const label = `${name} (пользовательский фильтр)`;
+        name = label;
+        for (let number = 2; usedNames.has(filterNameKey(name)); number += 1) {
+          name = `${label} ${number}`;
+        }
+        usedNames.add(filterNameKey(name));
+      }
+      return { id: filter.id, name, icon: filter.icon ?? DEFAULT_FILTER_ICON };
+    }),
   ];
   const displayMode = snapshot.document?.displayMode ?? "text";
   const [menuOpen, setMenuOpen] = useState(false);

@@ -41,7 +41,7 @@ The toolbar lists **Все**, **Без проектов**, **Все непроч
 
 **Все непрочитанные** shows active, visible threads marked unread. **Ждут действия** shows active, visible threads with a pending BB interaction, including approvals and structured questions. Both update live and group matches by their effective project, including personal threads under **Без проектов**. Execution highlighting also works in these views with the saved ordinary list set to Archived only.
 
-**Показать в дереве** scrolls to and focuses a matching row in the selected dynamic filter. If the thread falls outside that view, the command uses **Все** and asks for any confirmation needed to change visibility. A positioning timeout leaves the selected filter in place.
+**Показать в дереве** scrolls to and focuses a matching row in the selected dynamic filter. If the thread stays outside that view, the command uses **Все** with any confirmation needed to change visibility. A positioning timeout leaves the selected filter in place.
 
 Uploaded icons are static PNG files up to **64 KiB**, with each dimension from **1 to 512 px**, rendered in a **16×16 px** box. The shared document has a **255 KiB** total budget. Built-in icons use BB's own public icon renderer.
 

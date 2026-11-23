@@ -46,13 +46,13 @@ export function getErrorCode(error: unknown): string | null {
     : null;
 }
 
-function isHttpError(error: unknown): boolean {
+export function getErrorStatus(error: unknown): number | null {
   const record = toRecord(error);
-  return record !== null && typeof record.status === "number";
+  return record !== null && typeof record.status === "number" ? record.status : null;
 }
 
 function isNetworkTransportError(error: unknown): boolean {
-  if (isHttpError(error) || toRecord(error)?.name === "AbortError") {
+  if (getErrorStatus(error) !== null || toRecord(error)?.name === "AbortError") {
     return false;
   }
   const record = toRecord(error);

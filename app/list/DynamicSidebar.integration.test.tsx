@@ -15,6 +15,7 @@ import { makePluginProject, makeSidebarThread } from "../model/fixtures.js";
 import { flushPreferenceWritesForTest, resetPreferencesSyncForTest, setPreferencesMirrorStorageForTest } from "../preferences/preferences-sync.js";
 import { requestThreadReveal } from "../reveal/ThreadReveal.js";
 import { requestQuickThreadSearch } from "../search/QuickThreadSearch.js";
+import { entry as makeSearchThread } from "../search/test-fixtures.js";
 
 const app = await loadPluginApp(() => import("../../app.js"));
 const ThreadList = app.threadLists[0]!.component;
@@ -81,20 +82,23 @@ function mockWindowing(mountOnScroll: boolean) {
   vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
     return this.closest("[data-sidebar-dynamic-filter]") ? offscreen : viewport;
   });
-  scrollIntoView.mockImplementation(function (this: HTMLElement) {
-    if (!mountOnScroll || !this.hasAttribute("data-sidebar-windowed-nav")) return;
+  function notifyIntersection(target: Element, isIntersecting: boolean) {
     const entry: IntersectionObserverEntry = {
-      target: this,
-      isIntersecting: true,
+      target,
+      isIntersecting,
       boundingClientRect: offscreen,
-      intersectionRatio: 1,
-      intersectionRect: offscreen,
+      intersectionRatio: isIntersecting ? 1 : 0,
+      intersectionRect: isIntersecting ? offscreen : new DOMRect(),
       rootBounds: viewport,
       time: 0,
     };
-    const observer = observerByTarget.get(this);
+    const observer = observerByTarget.get(target);
     if (observer) observer([entry], {} as IntersectionObserver);
+  }
+  scrollIntoView.mockImplementation(function (this: HTMLElement) {
+    if (mountOnScroll && this.hasAttribute("data-sidebar-windowed-nav")) notifyIntersection(this, true);
   });
+  return (target: Element, isIntersecting: boolean) => act(() => notifyIntersection(target, isIntersecting));
 }
 
 interface MountOptions {
@@ -386,6 +390,121 @@ describe("dynamic sidebar filters", () => {
     expect(harness.getPreferenceWrites()).toContainEqual({ method: "setPreference", input: { key: "hiddenGroups", value: [] } });
   });
 
+  it("positions a newly matching row after confirmation without applying the old visibility plan", async () => {
+    const harness = await mount({
+      preferences: { hiddenGroups: ["project:app"] },
+      threads: [{ ...active, hasPendingInteraction: false }],
+    });
+    fireEvent.click(radio("Ждут действия"));
+    await act(async () => requestThreadReveal(active.id));
+    expect((await screen.findByRole("dialog")).textContent).toContain("Группа скрыта");
+    harness.setActiveSnapshot([active]);
+    expect(row()).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Показать в дереве" }));
+    await waitFor(() => expect(document.activeElement).toBe(row()));
+    expect(radio("Ждут действия").getAttribute("aria-checked")).toBe("true");
+    expect(row()?.hasAttribute("data-project-first-reveal-highlight")).toBe(true);
+    await flushPreferenceWritesForTest();
+    expect(harness.getPreferenceWrites()).toEqual([]);
+    expect(harness.view.inspection.sdkCalls).toEqual([]);
+  });
+
+  it("follows an explicit project destination even when the thread starts matching while the dialog is open", async () => {
+    const harness = await mount({
+      preferences: { hiddenGroups: ["project:app"] },
+      threads: [{ ...active, hasPendingInteraction: false }],
+    });
+    fireEvent.click(radio("Ждут действия"));
+    await act(async () => requestThreadReveal(active.id));
+    await screen.findByRole("dialog");
+    harness.setActiveSnapshot([active]);
+    fireEvent.click(screen.getByRole("button", { name: "Перейти к проекту" }));
+    await waitFor(() => expect(document.activeElement?.getAttribute("aria-label")).toBe("Collapse App section"));
+    expect(radio("Все").getAttribute("aria-checked")).toBe("true");
+    await flushPreferenceWritesForTest();
+    expect(harness.getPreferenceWrites()).toContainEqual({ method: "setPreference", input: { key: "hiddenGroups", value: [] } });
+  });
+
+  it("waits until the target actually takes focus before applying reveal highlighting", async () => {
+    await mount({ threads: [active] });
+    fireEvent.click(radio("Все непрочитанные"));
+    const target = row()!;
+    const focus = vi.spyOn(target, "focus").mockImplementation(() => {});
+    await act(async () => requestThreadReveal(active.id));
+    expect(focus).toHaveBeenCalled();
+    expect(target.hasAttribute("data-project-first-reveal-highlight")).toBe(false);
+    focus.mockRestore();
+    await waitFor(() => expect(document.activeElement).toBe(target));
+    expect(target.hasAttribute("data-project-first-reveal-highlight")).toBe(true);
+  });
+
+  it("positions only the matching link inside the current dynamic container", async () => {
+    await mount({ threads: [active] });
+    fireEvent.click(radio("Все непрочитанные"));
+    const target = row()!;
+    const stale = target.cloneNode(true) as HTMLAnchorElement;
+    const root = target.closest("[data-project-first-sidebar]")!;
+    root.prepend(stale);
+    try {
+      await act(async () => requestThreadReveal(active.id));
+      await waitFor(() => expect(document.activeElement).toBe(target));
+      expect(stale.hasAttribute("data-project-first-reveal-highlight")).toBe(false);
+      expect(scrollIntoView.mock.contexts).toEqual([target]);
+    } finally {
+      stale.remove();
+    }
+  });
+
+  it("reveals an available child under All when its parent returns 404", async () => {
+    const get = vi.fn(async () => { throw Object.assign(new Error("Parent not found"), { status: 404 }); });
+    await mount({
+      threads: [{ ...active, parentThreadId: "missing-parent", isUnread: false }],
+      sdk: { threads: { get } },
+    });
+    fireEvent.click(radio("Все непрочитанные"));
+    await act(async () => requestThreadReveal(active.id));
+    await waitFor(() => {
+      expect(row()).not.toBeNull();
+      expect(document.activeElement).toBe(row());
+    });
+    expect(radio("Все").getAttribute("aria-checked")).toBe("true");
+    expect(get).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ threadId: "missing-parent" }));
+  });
+
+  it("keeps a newly matching child in the dynamic filter while its ordinary path is loading", async () => {
+    let finishRead!: () => void;
+    const pendingRead = new Promise<void>((resolve) => { finishRead = resolve; });
+    const get = vi.fn(async () => {
+      await pendingRead;
+      throw Object.assign(new Error("Parent not found"), { status: 404 });
+    });
+    const child = { ...active, parentThreadId: "missing-parent", hasPendingInteraction: false };
+    const harness = await mount({ threads: [child], sdk: { threads: { get } } });
+    fireEvent.click(radio("Ждут действия"));
+    await act(async () => requestThreadReveal(active.id));
+    await waitFor(() => expect(get).toHaveBeenCalledOnce());
+    harness.setActiveSnapshot([{ ...child, hasPendingInteraction: true }]);
+    await act(async () => finishRead());
+    await waitFor(() => expect(document.activeElement).toBe(row()));
+    expect(radio("Ждут действия").getAttribute("aria-checked")).toBe("true");
+    await flushPreferenceWritesForTest();
+    expect(harness.getPreferenceWrites()).toEqual([]);
+  });
+
+  it.each([
+    { threads: [], status: 404, id: active.id },
+    { threads: [{ ...active, parentThreadId: "forbidden", isUnread: false }], status: 403, id: "forbidden" },
+  ])("keeps a failed lookup of $id outside the fallback result", async ({ threads, status, id }) => {
+    const onError = vi.spyOn(toast, "error");
+    const get = vi.fn(async () => { throw Object.assign(new Error("Lookup failed"), { status }); });
+    await mount({ threads, sdk: { threads: { get } } });
+    fireEvent.click(radio("Все непрочитанные"));
+    await act(async () => requestThreadReveal(active.id));
+    await waitFor(() => expect(onError).toHaveBeenCalledExactlyOnceWith("Lookup failed"));
+    expect(get).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ threadId: id }));
+    expect(radio("Все непрочитанные").getAttribute("aria-checked")).toBe("true");
+  });
+
   it("reports a positioning timeout while the target still matches", async () => {
     mockWindowing(false);
     const onError = vi.spyOn(toast, "error");
@@ -445,6 +564,41 @@ describe("dynamic sidebar filters", () => {
     expect(row()).toBeNull();
     await flushPreferenceWritesForTest();
     expect(harness.getPreferenceWrites()).toEqual([]);
+  });
+
+  it("consumes an unread event committed together with leaving a dynamic filter, then reveals a new event", async () => {
+    const first = { ...active, isUnread: false };
+    const second = makeSidebarThread({ id: "next", projectId: "app", isUnread: false });
+    const harness = await mount({ preferences: { collapsedProjects: ["app"] }, threads: [first, second] });
+    fireEvent.click(radio("Ждут действия"));
+    act(() => {
+      harness.setActiveSnapshot([active, second]);
+      windowFilterStore.setActiveFilterId("all");
+    });
+    expect(row()).toBeNull();
+    await flushPreferenceWritesForTest();
+    expect(harness.getPreferenceWrites()).toEqual([]);
+
+    harness.setActiveSnapshot([active, { ...second, isUnread: true }]);
+    await waitFor(() => expect(row(second.id)).not.toBeNull());
+    await flushPreferenceWritesForTest();
+    expect(harness.getPreferenceWrites()).toContainEqual({ method: "setPreference", input: { key: "collapsedProjects", value: [] } });
+  });
+
+  it("keeps the unsaved rename editor when its row leaves the virtualized viewport", async () => {
+    const intersect = mockWindowing(false);
+    await mount({ windowed: true, threads: [active] });
+    fireEvent.click(radio("Все непрочитанные"));
+    const wrapper = document.querySelector(`[data-sidebar-windowed-nav="${active.id}:${active.projectId}"]`)!;
+    intersect(wrapper, true);
+    fireEvent.doubleClick(title()!);
+    const editor = await screen.findByRole("textbox", { name: "Thread name" });
+    fireEvent.change(editor, { target: { value: "Unsaved title" } });
+    intersect(wrapper, false);
+    expect(row()).not.toBeNull();
+    expect(screen.getByRole("textbox", { name: "Thread name" })).toBe(editor);
+    intersect(wrapper, true);
+    expect(editor).toHaveProperty("value", "Unsaved title");
   });
 
   it.each(["filter", "always-show"] as const)("shows a read pending pin once and ignores an ordinary read pin with %s", async (pinnedMode) => {
@@ -610,5 +764,30 @@ describe("dynamic sidebar filters", () => {
     await harness.refreshFilters({}, true);
     expect(radio("Ждут действия").getAttribute("aria-checked")).toBe("true");
     expect(row()).not.toBeNull();
+  });
+
+  it("opens a quick-search result from a dynamic filter and focuses its ordinary row", async () => {
+    const result = makeSearchThread({ id: active.id, projectId: active.projectId, title: active.displayTitle });
+    const project = { id: active.projectId, name: "App", kind: "standard" as const, gitRemoteUrl: null, sources: [], createdAt: 1, updatedAt: 1 };
+    const harness = await mount({
+      quickSearch: true,
+      preferences: { collapsedProjects: [active.projectId] },
+      threads: [active],
+      sdk: {
+        threads: { list: async ({ offset } = {}) => offset ? [] : [result], get: async () => result },
+        projects: { list: async () => [project] },
+      },
+    });
+    fireEvent.click(radio("Ждут действия"));
+    await act(async () => requestQuickThreadSearch());
+    fireEvent.click(await screen.findByRole("option", { name: "Все" }));
+    fireEvent.click(await screen.findByRole("option", { name: /Active match/ }));
+    await waitFor(() => expect(harness.view.inspection.navigateCalls).toContainEqual({ method: "toThread", threadId: active.id }));
+    await waitFor(() => {
+      expect(row()).not.toBeNull();
+      expect(document.activeElement).toBe(row());
+    });
+    expect(radio("Все").getAttribute("aria-checked")).toBe("true");
+    expect(row()?.closest("[data-sidebar-dynamic-filter]")).toBeNull();
   });
 });

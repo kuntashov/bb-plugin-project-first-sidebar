@@ -306,16 +306,20 @@ function useSidebarThreadRevealCore({
     [fullThreads],
   );
   const revealState = useRef(INITIAL_SIDEBAR_THREAD_REVEAL_STATE);
+  const wasSuppressingExpansion = useRef(suppressExpansion);
 
   useEffect(() => {
+    // The commit that exits the dynamic filter may also carry its last live update.
+    const consumeOnly = suppressExpansion || wasSuppressingExpansion.current;
+    wasSuppressingExpansion.current = suppressExpansion;
     const step = stepSidebarThreadReveal(revealState.current, {
       selectedThreadId,
       threads: fullThreads,
       threadById,
       threadsReady,
-      preferencesReady: preferencesReady || suppressExpansion,
+      preferencesReady: preferencesReady || consumeOnly,
     });
-    if (suppressExpansion) {
+    if (consumeOnly) {
       revealState.current = {
         ...step.state,
         pendingNavigation: undefined,

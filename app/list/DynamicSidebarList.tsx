@@ -4,6 +4,7 @@ import { DYNAMIC_FILTERS, type DynamicFilterId } from "../filters/dynamic-filter
 import type { DynamicSidebarProjection } from "../model/dynamic-sidebar-projection.js";
 import type { SidebarThread } from "../model/sidebar-thread.js";
 import { useDynamicSidebar } from "../model/use-dynamic-sidebar.js";
+import { useSidebarRenameState } from "../rows/SidebarInlineRename.js";
 import { ThreadRow, type ThreadRowOptions } from "../rows/ThreadRow.js";
 import { SidebarMenuSkeleton } from "../ui/sidebar.js";
 import { SidebarWindowedItems } from "./SidebarWindowedItems.js";
@@ -11,6 +12,10 @@ import { SidebarWindowedItems } from "./SidebarWindowedItems.js";
 type DynamicSidebarItem =
   | { kind: "heading"; key: string; name: string }
   | { kind: "thread"; key: string; projectId: string; thread: SidebarThread };
+
+function threadItemKey(threadId: string): string {
+  return `thread:${threadId}`;
+}
 
 function buildItems(projection: DynamicSidebarProjection | null): DynamicSidebarItem[] {
   const items: DynamicSidebarItem[] = [];
@@ -21,7 +26,7 @@ function buildItems(projection: DynamicSidebarProjection | null): DynamicSidebar
       name: project.isPersonal ? "Без проектов" : project.name,
     });
     for (const thread of threads) {
-      items.push({ kind: "thread", key: `thread:${thread.id}`, projectId: project.id, thread });
+      items.push({ kind: "thread", key: threadItemKey(thread.id), projectId: project.id, thread });
     }
   }
   return items;
@@ -33,10 +38,16 @@ export function DynamicSidebarList({ filterId, activeThreadId, onProjectSelect }
   onProjectSelect?: () => void;
 }) {
   const { status, projection } = useDynamicSidebar(filterId);
+  const rename = useSidebarRenameState();
+  const renamingThreadId = rename?.kind === "thread" ? rename.id : null;
   const isCompact = useIsCompactViewport();
   const options = useMemo<ThreadRowOptions>(() => ({ kind: "default", depth: 0, isCompact }), [isCompact]);
   const items = useMemo(() => buildItems(projection), [projection]);
   const itemKeys = useMemo(() => items.map((item) => item.key), [items]);
+  const alwaysMountedKeys = useMemo(
+    () => renamingThreadId === null ? undefined : new Set([threadItemKey(renamingThreadId)]),
+    [renamingThreadId],
+  );
   const filter = DYNAMIC_FILTERS[filterId];
 
   return (
@@ -53,6 +64,7 @@ export function DynamicSidebarList({ filterId, activeThreadId, onProjectSelect }
       ) : (
         <SidebarWindowedItems
           itemKeys={itemKeys}
+          alwaysMountedKeys={alwaysMountedKeys}
           estimateRows={() => 1}
           getNavigationEntries={(index) => {
             const item = items[index]!;

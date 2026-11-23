@@ -2,6 +2,7 @@ import type { PluginBrowserBbSdk } from "@get-bb/plugin-sdk/app";
 import type { useSidebarData } from "../model/use-sidebar-data.js";
 import type { RevealThread } from "./reveal-plan.js";
 import { waitForReveal } from "./reveal-position.js";
+import { getErrorStatus } from "../ui/mutation-errors.js";
 
 type SidebarData = ReturnType<typeof useSidebarData>;
 
@@ -22,15 +23,21 @@ export async function loadRevealChain(
     seen.add(id);
     let thread: RevealThread | undefined = cached.get(id);
     if (!thread) {
-      const value = await sdk.threads.get({ threadId: id, include: "environment", signal });
-      const environment = "environment" in value ? value.environment : null;
-      thread = {
-        id: value.id, projectId: value.projectId, parentThreadId: value.parentThreadId,
-        sectionId: value.sectionId, environment: { id: value.environmentId },
-        host: environment?.hostId ? { id: environment.hostId } : null,
-        isPinned: value.pinnedAt !== null, isArchived: value.archivedAt !== null,
-        isHidden: value.visibility === "hidden",
-      };
+      try {
+        const value = await sdk.threads.get({ threadId: id, include: "environment", signal });
+        const environment = "environment" in value ? value.environment : null;
+        thread = {
+          id: value.id, projectId: value.projectId, parentThreadId: value.parentThreadId,
+          sectionId: value.sectionId, environment: { id: value.environmentId },
+          host: environment?.hostId ? { id: environment.hostId } : null,
+          isPinned: value.pinnedAt !== null, isArchived: value.archivedAt !== null,
+          isHidden: value.visibility === "hidden",
+        };
+      } catch (error) {
+        signal.throwIfAborted();
+        if (chain.length > 0 && getErrorStatus(error) === 404) break;
+        throw error;
+      }
     }
     // A parent excluded by lifecycle does not participate in sidebar placement.
     const lifecycle = thread.isArchived ? "archived" : "active";

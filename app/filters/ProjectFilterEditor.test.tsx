@@ -14,6 +14,7 @@ import type { PluginRpcCallArgs } from "@get-bb/plugin-sdk/app";
 import type { projectFirstSidebarRpcContract } from "../../server.js";
 import {
   defaultFilterDocument,
+  filterDocumentSchema,
   type FilterDocumentV1,
   type FilterMutationResult,
   type ProjectFilterDefinition,
@@ -114,6 +115,31 @@ describe("project filter editor", () => {
     );
     expect(registration).toMatchObject({ title: "Фильтры проектов" });
     expect(registration?.component).toBe(ProjectFilterEditor);
+  });
+
+  it("edits a legacy filter with a dynamic name and ID without rewriting its identity", async () => {
+    const id = "waiting-for-action";
+    const name = "Ждут действия";
+    let saved = document(7, [{ id, name, rule: { kind: "nameGlobs", globs: ["old-*"] } }]);
+    const updateFilter = vi.fn((input: RpcInput<"updateFilter">) => {
+      saved = filterDocumentSchema.parse(document(8, [{ id: input.filterId, name: input.name, rule: input.rule }]));
+      return { status: "success" as const, document: saved };
+    });
+    const store = createWindowFilterStore();
+    const slot = renderTypedSlot({ component: ProjectFilterEditor }, { store }, {
+      rpc: { listFilters: () => ({ status: "success", document: saved }), updateFilter },
+    });
+    fireEvent.click(await slot.findByRole("button", { name: `Редактировать ${name}` }));
+    expect(requireInput(slot.getByLabelText("Имя фильтра")).value).toBe(name);
+    fireEvent.change(slot.getByLabelText("Маски проектов"), { target: { value: "app-*" } });
+    fireEvent.click(slot.getByRole("button", { name: "Сохранить фильтр" }));
+    await waitFor(() => expect(updateFilter).toHaveBeenCalledOnce());
+    expect(updateFilter).toHaveBeenCalledWith(expect.objectContaining({
+      expectedRevision: 7, filterId: id, name, rule: { kind: "nameGlobs", globs: ["app-*"] },
+    }));
+    await waitFor(() => expect(store.getSnapshot().document).toEqual(document(8, [
+      { id, name, rule: { kind: "nameGlobs", globs: ["app-*"] } },
+    ])));
   });
 
   it("cancels without writing and creates one definition without changing the active filter", async () => {

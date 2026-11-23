@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { windowFilterStore, ALL_FILTER_ID, PROJECTLESS_FILTER_ID, type ActiveFilterId } from "../filters/filter-store.js";
-import { DYNAMIC_FILTERS, isDynamicFilterId } from "../filters/dynamic-filter-ids.js";
+import { DYNAMIC_FILTERS, isDynamicFilterId, type DynamicFilterId } from "../filters/dynamic-filter-ids.js";
 import { useFilterDocumentSync } from "../filters/use-filter-document-sync.js";
 import { useWindowFilterSnapshot } from "../filters/use-filter-snapshot.js";
 import { hasProjectModeThreadsSection, projectSidebarSnapshot } from "../model/sidebar-projection.js";
@@ -92,6 +92,38 @@ export function ThreadReveal() {
       signal.addEventListener("abort", abort, { once: true });
       if (signal.aborted) abort();
     });
+    const revealDynamicMatch = async (
+      root: HTMLElement,
+      filterId: DynamicFilterId,
+      threadId: string,
+      signal: AbortSignal,
+    ): Promise<boolean> => {
+      const readMatch = (): boolean | null => {
+        const { dynamic, dynamicFilterId } = latest.current;
+        if (dynamicFilterId !== filterId || dynamic.status === "loading") return null;
+        if (dynamic.status === "error") throw new Error("Не удалось загрузить активные треды.");
+        return dynamic.projection?.threadIds.has(threadId) ?? null;
+      };
+      const { matches } = await waitForReveal(() => {
+        const matches = readMatch();
+        return matches === null ? null : { matches };
+      }, signal);
+      if (!matches) return false;
+
+      const selector = `[data-sidebar-dynamic-filter="${DYNAMIC_FILTERS[filterId].key}"]`;
+      try {
+        const row = await positionRevealThread(() => {
+          const matches = readMatch();
+          if (matches === false) throw DYNAMIC_MATCH_REMOVED;
+          return matches === true ? root.querySelector<HTMLElement>(selector) : null;
+        }, threadId, signal);
+        highlight(row, signal);
+        return true;
+      } catch (error) {
+        if (error === DYNAMIC_MATCH_REMOVED) return false;
+        throw error;
+      }
+    };
     const perform = async (
       threadId: string,
       signal: AbortSignal,
@@ -99,36 +131,12 @@ export function ThreadReveal() {
       selectFilter: (id: ActiveFilterId) => void,
     ) => {
       const root = await openRevealSidebar(signal);
-      const startedInDynamicFilter = isDynamicFilterId(initialFilterId);
-      if (startedInDynamicFilter) {
-        const readMatch = (): boolean | null => {
-          const { dynamic, dynamicFilterId } = latest.current;
-          if (dynamicFilterId !== initialFilterId || dynamic.status === "loading") return null;
-          if (dynamic.status === "error") throw new Error("Не удалось загрузить активные треды.");
-          return dynamic.projection?.threadIds.has(threadId) ?? null;
-        };
-        const { matches } = await waitForReveal(() => {
-          const matches = readMatch();
-          return matches === null ? null : { matches };
-        }, signal);
-        if (matches) {
-          const selector = `[data-sidebar-dynamic-filter="${DYNAMIC_FILTERS[initialFilterId].key}"]`;
-          try {
-            const row = await positionRevealThread(root, threadId, signal, () => {
-              const matches = readMatch();
-              if (matches === false) throw DYNAMIC_MATCH_REMOVED;
-              return matches === true && root.querySelector(selector) !== null;
-            });
-            highlight(row, signal);
-            return;
-          } catch (error) {
-            if (error !== DYNAMIC_MATCH_REMOVED) throw error;
-          }
-        }
-      }
+      const dynamicId = isDynamicFilterId(initialFilterId) ? initialFilterId : null;
+      if (dynamicId && await revealDynamicMatch(root, dynamicId, threadId, signal)) return;
       await waitForReveal(() => latest.current.preferencesReady && latest.current.data.status === "ready"
-        && (startedInDynamicFilter || windowFilterStore.getSnapshot().status === "ready"), signal);
+        && (dynamicId !== null || windowFilterStore.getSnapshot().status === "ready"), signal);
       let chain = await loadChain(threadId, signal);
+      if (dynamicId && await revealDynamicMatch(root, dynamicId, threadId, signal)) return;
       const personalId = latest.current.data.personalProject?.id ?? null;
       let plan = planThreadReveal(chain, preferences(), personalId);
       const project = latest.current.data.projects.find((item) => item.id === plan.projectId);
@@ -141,7 +149,9 @@ export function ThreadReveal() {
         signal.throwIfAborted();
         if (choice === "cancel") return;
         await waitForReveal(() => !cancelRef.current, signal);
+        if (choice === "thread" && dynamicId && await revealDynamicMatch(root, dynamicId, threadId, signal)) return;
         chain = await loadChain(threadId, signal);
+        if (choice === "thread" && dynamicId && await revealDynamicMatch(root, dynamicId, threadId, signal)) return;
         plan = planThreadReveal(chain, preferences(), personalId);
         // A dialog cannot authorize changes that appeared while it was open.
         if (plan.projectId !== approved.projectId || (choice === "thread" && (
@@ -195,6 +205,7 @@ export function ThreadReveal() {
           store.set(sidebarHiddenGroupsAtom, (ids) => ids.filter((id) => id !== groupId));
         }
         const target = await loadRevealTarget(chain, () => latest.current.data, signal);
+        if (plan.reasons.length === 0 && dynamicId && await revealDynamicMatch(root, dynamicId, threadId, signal)) return;
         signal.throwIfAborted();
         const snapshot = windowFilterStore.getSnapshot();
         const visibleInCurrentFilter = typeof snapshot.activeFilterId === "string" && projectSidebarSnapshot({
@@ -220,16 +231,19 @@ export function ThreadReveal() {
       const controller = new AbortController();
       operation = controller;
       const signal = controller.signal;
-      let expectedFilterId = windowFilterStore.getSnapshot().activeFilterId;
+      const initialFilterId = windowFilterStore.getSnapshot().activeFilterId;
+      let expectedFilterId = initialFilterId;
       const unsubscribe = windowFilterStore.subscribe(() => {
-        if (windowFilterStore.getSnapshot().activeFilterId !== expectedFilterId) controller.abort();
+        const currentFilterId = windowFilterStore.getSnapshot().activeFilterId;
+        if (currentFilterId !== expectedFilterId
+          && (isDynamicFilterId(initialFilterId) || isDynamicFilterId(currentFilterId))) controller.abort();
       });
       const selectFilter = (id: ActiveFilterId) => {
         signal.throwIfAborted();
         expectedFilterId = id;
         windowFilterStore.setActiveFilterId(id);
       };
-      void perform(event.detail, signal, expectedFilterId, selectFilter).catch((error: unknown) => {
+      void perform(event.detail, signal, initialFilterId, selectFilter).catch((error: unknown) => {
         if (!signal.aborted) toast.error(error instanceof Error ? error.message : "Не удалось показать тред.");
       }).finally(() => {
         unsubscribe();

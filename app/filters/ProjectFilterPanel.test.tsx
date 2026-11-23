@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { CompactViewportOverrideProvider } from "@/components/ui/hooks/use-compact-viewport";
-import { cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   installTestPluginRuntime,
@@ -9,6 +9,7 @@ import {
 } from "@get-bb/plugin-sdk/testing/app";
 import { FILTERS_CHANGED_CHANNEL, type FilterReadResult } from "../../shared/filters.js";
 import { createWindowFilterStore } from "./filter-store.js";
+import { WAITING_FOR_ACTION_FILTER_ID } from "./dynamic-filter-ids.js";
 
 installTestPluginRuntime();
 const { ProjectFilterPanel } = await import("./ProjectFilterPanel.js");
@@ -175,18 +176,20 @@ describe("project filter panel", () => {
       },
     );
 
-    await waitFor(() => expect(slot.getAllByRole("radio")).toHaveLength(4));
+    const last = await slot.findByRole("radio", { name: longName });
     const radios = slot.getAllByRole("radio");
     expect(radios.map((radio) => radio.getAttribute("aria-label"))).toEqual([
       "Все",
       "Без проектов",
+      "Все непрочитанные",
+      "Ждут действия",
       "👨‍👩‍👧‍👦",
       longName,
     ]);
     expect(slot.getByRole("radiogroup", { name: "Фильтры проектов" }).classList).toContain("flex-wrap");
-    expect(radios[3]!.className).toContain("max-w-full");
-    expect(radios[3]!.className).toContain("whitespace-normal");
-    expect(radios[3]!.className).toContain("break-words");
+    expect(last.className).toContain("max-w-full");
+    expect(last.className).toContain("whitespace-normal");
+    expect(last.className).toContain("break-words");
     expect(radios[0]!.getAttribute("tabindex")).toBe("0");
     expect(radios[1]!.getAttribute("tabindex")).toBe("-1");
 
@@ -196,16 +199,38 @@ describe("project filter panel", () => {
     expect(document.activeElement).toBe(radios[1]);
 
     fireEvent.keyDown(radios[1]!, { key: "End" });
-    expect(radios[3]!.getAttribute("aria-checked")).toBe("true");
-    expect(document.activeElement).toBe(radios[3]);
-    fireEvent.keyDown(radios[3]!, { key: "Home" });
+    expect(last.getAttribute("aria-checked")).toBe("true");
+    expect(document.activeElement).toBe(last);
+    fireEvent.keyDown(last, { key: "Home" });
     expect(document.activeElement).toBe(radios[0]);
     fireEvent.keyDown(radios[0]!, { key: "ArrowLeft" });
-    expect(document.activeElement).toBe(radios[3]);
+    expect(document.activeElement).toBe(last);
 
-    expect(fireEvent.keyDown(radios[3]!, { key: "Tab" })).toBe(true);
-    expect(radios[3]!.getAttribute("aria-checked")).toBe("true");
+    expect(fireEvent.keyDown(last, { key: "Tab" })).toBe(true);
+    expect(last.getAttribute("aria-checked")).toBe("true");
     expect(slot.inspection.navigateCalls).toEqual([]);
+  });
+
+  it("reserves literal labels and disambiguates only the visible built-in collision", async () => {
+    const name = "Ждут действия";
+    const literal = `${name} (пользовательский фильтр)`;
+    const store = createWindowFilterStore();
+    const slot = renderSlot({ component: ProjectFilterPanel }, { store }, {
+      rpc: { listFilters: () => success(1, [
+        { id: "waiting-for-action", name },
+        { id: "literal", name: literal },
+      ]) },
+    });
+    const custom = await slot.findByRole("radio", { name: `${literal} 2` });
+    expect(custom.textContent).toBe(`${literal} 2`);
+    expect(slot.getByRole("radio", { name: literal }).textContent).toBe(literal);
+    fireEvent.click(custom);
+    act(() => store.setBuiltInFilterVisible(WAITING_FOR_ACTION_FILTER_ID, false));
+    const selected = slot.getByRole("radio", { name });
+    expect(selected).toBe(custom);
+    expect(selected.textContent).toBe(name);
+    expect(selected.getAttribute("aria-checked")).toBe("true");
+    expect(store.getSnapshot().document?.filters[0]?.name).toBe(name);
   });
 
   it("refetches for realtime and reconnect, then focuses All when the focused active filter is deleted", async () => {
