@@ -21,13 +21,16 @@ import {
 } from "@get-bb/plugin-sdk/testing/app";
 import { makePluginProject, makeSidebarThread } from "./app/model/fixtures.js";
 import {
+  flushPreferenceWritesForTest,
   resetPreferencesSyncForTest,
   setPreferencesMirrorStorageForTest,
 } from "./app/preferences/preferences-sync.js";
 import {
   defaultPreferences,
+  PREFERENCES_CHANGED_CHANNEL,
   type PreferenceValues,
 } from "./shared/preferences.js";
+import { windowFilterStore } from "./app/filters/filter-store.js";
 import { defaultFilterDocument } from "./shared/filters.js";
 
 const app = await loadPluginApp(() => import("./app"));
@@ -244,6 +247,60 @@ afterEach(() => {
 });
 
 describe("project-first-sidebar plugin", () => {
+  it("applies built-in visibility preferences to the sidebar after edits, remount and realtime", async () => {
+    const settings = app.settingsSections.find((section) => section.id === "built-in-filter-visibility")!;
+    expect(settings).toBeDefined();
+    const props: PluginThreadListProps = {
+      activeThreadId: null, activeProjectId: null, isCompactViewport: false, onNavigate: () => {}, searchQuery: "",
+    };
+    function Component() {
+      return <><registration.component {...props} /><settings.component /></>;
+    }
+    const preferences = defaultPreferences();
+    const options: RenderSlotOptions = {
+      rpc: {
+        listPreferences: () => ({ preferences }),
+        listFilters: () => ({ status: "success", document: defaultFilterDocument() }),
+        setPreference: (input) => {
+          const { key, value } = input as { key: "showProjectlessFilter"; value: boolean };
+          preferences[key] = value;
+          return input;
+        },
+      },
+    };
+    const first = renderSlot({ component: Component }, {}, options);
+    const projectless = await screen.findByRole("radio", { name: "Без проектов" });
+    const setting = (name: string) => screen.getByRole<HTMLInputElement>("checkbox", { name });
+    const label = "Показывать фильтр «Без проектов»";
+    await waitFor(() => expect(setting(label).disabled).toBe(false));
+    expect(setting(label).checked).toBe(true);
+    expect(setting("Показывать фильтр «Непрочитанные»").checked).toBe(true);
+    expect(setting("Показывать фильтр «Ждут действия»").checked).toBe(true);
+    fireEvent.click(projectless);
+    fireEvent.click(setting(label));
+    expect(screen.queryByRole("radio", { name: "Без проектов" })).toBeNull();
+    expect(screen.getByRole("radio", { name: "Все" }).getAttribute("aria-checked")).toBe("true");
+    act(() => windowFilterStore.setActiveFilterId("projectless"));
+    expect(windowFilterStore.getSnapshot().activeFilterId).toBe("all");
+    await act(async () => flushPreferenceWritesForTest());
+    expect(first.rpcCalls.filter(({ method }) => method === "setPreference")).toEqual([
+      { method: "setPreference", input: { key: "showProjectlessFilter", value: false } },
+    ]);
+    first.unmount();
+
+    const remounted = renderSlot({ component: Component }, {}, options);
+    await waitFor(() => expect(setting(label).checked).toBe(false));
+    expect(screen.queryByRole("radio", { name: "Без проектов" })).toBeNull();
+    await remounted.behavior.emitRealtime(PREFERENCES_CHANGED_CHANNEL, { key: "showProjectlessFilter", value: true });
+    const restored = await screen.findByRole("radio", { name: "Без проектов" });
+    expect(restored.getAttribute("aria-checked")).toBe("false");
+    expect(setting(label).checked).toBe(true);
+    fireEvent.click(restored);
+    act(() => restored.focus());
+    await remounted.behavior.emitRealtime(PREFERENCES_CHANGED_CHANNEL, { key: "showProjectlessFilter", value: false });
+    expect(document.activeElement).toBe(screen.getByRole("radio", { name: "Все" }));
+  });
+
   it("shows the navigation skeleton until preferences load", () => {
     setPreferencesMirrorStorageForTest(null);
     renderSlot(registration, props(), {

@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { windowFilterStore, ALL_FILTER_ID, PROJECTLESS_FILTER_ID } from "../filters/filter-store.js";
 import { useFilterDocumentSync } from "../filters/use-filter-document-sync.js";
-import { projectSidebarSnapshot } from "../model/sidebar-projection.js";
+import { hasProjectModeThreadsSection, projectSidebarSnapshot } from "../model/sidebar-projection.js";
 import { useSidebarData } from "../model/use-sidebar-data.js";
 import { buildPinnedSidebarState } from "../model/pinned-sidebar-threads.js";
 import { useExpandSidebarThreadPath } from "../list/useSidebarThreadReveal.js";
@@ -107,18 +107,33 @@ export function ThreadReveal() {
       signal.throwIfAborted();
       let row: HTMLElement;
       if (choice === "project") {
-        // Project rows belong to project layout. Keep chronological/machine
-        // preferences intact: the project page is the destination in those modes.
-        windowFilterStore.setActiveFilterId(project.isPersonal ? PROJECTLESS_FILTER_ID : ALL_FILTER_ID);
+        const showPersonalFilter = project.isPersonal && windowFilterStore.isFilterAvailable(PROJECTLESS_FILTER_ID);
+        windowFilterStore.setActiveFilterId(showPersonalFilter ? PROJECTLESS_FILTER_ID : ALL_FILTER_ID);
         if (store.get(sidebarOrganizationModeAtom) !== "project") {
           navigate.toProject(plan.projectId);
           return;
         }
+        const destination = project.isPersonal ? (showPersonalFilter ? "personal-filter" : "personal-section") : "project";
+        if (destination === "personal-section") {
+          const full = projectSidebarSnapshot({
+            activeFilterId: ALL_FILTER_ID,
+            document: null,
+            snapshot: latest.current.data,
+          }).full;
+          if (!hasProjectModeThreadsSection(full, personalId)) {
+            navigate.toProject(plan.projectId);
+            return;
+          }
+        }
         const groupId = project.isPersonal ? "threads" : `project:${plan.projectId}`;
-        store.set(sidebarHiddenGroupsAtom, (ids) => ids.filter((id) => id !== groupId));
-        store.set(collapsedProjectIdsAtom, (ids) => ids.filter((id) => id !== plan.projectId));
-        if (project.isPersonal) store.set(collapsedSidebarSectionIdsAtom, (ids) => ids.filter((id) => id !== "threads"));
-        row = await positionRevealProject(root, plan.projectId, project.isPersonal, signal);
+        store.set(sidebarHiddenGroupsAtom, (ids) => ids.includes(groupId) ? ids.filter((id) => id !== groupId) : ids);
+        if (destination !== "personal-section") {
+          store.set(collapsedProjectIdsAtom, (ids) => ids.includes(plan.projectId) ? ids.filter((id) => id !== plan.projectId) : ids);
+        }
+        if (project.isPersonal) {
+          store.set(collapsedSidebarSectionIdsAtom, (ids) => ids.includes("threads") ? ids.filter((id) => id !== "threads") : ids);
+        }
+        row = await positionRevealProject(root, plan.projectId, destination, signal);
       } else {
         for (const id of plan.hiddenThreadIds) {
           signal.throwIfAborted();

@@ -168,6 +168,75 @@ describe("explicit reveal through the mounted sidebar", () => {
     expect(windowFilterStore.getSnapshot().activeFilterId).toBe("projectless");
   });
 
+
+  it("restores the personal group from More and focuses its actual header when the filter is hidden", async () => {
+    const hidden = makeSidebarThread({ id: "personal-hidden", projectId: "personal", isHidden: true });
+    const visible = makeSidebarThread({ id: "personal-visible", projectId: "personal" });
+    const { rpcCalls, inspection } = await mount({
+      showProjectlessFilter: false, hiddenGroups: ["threads", "project:web"], collapsedSections: ["threads"],
+    }, [hidden, visible]);
+    act(() => windowFilterStore.setActiveFilterId("app-only"));
+    await reveal(hidden.id);
+    fireEvent.click(await screen.findByRole("button", { name: "Перейти к «Без проектов»" }));
+    const header = await screen.findByRole("button", { name: "Collapse Threads section" });
+    await waitFor(() => expect(document.activeElement).toBe(header));
+    expect(header.closest("[data-sidebar-visibility-group]")?.getAttribute("data-sidebar-visibility-group")).toBe("threads");
+    expect(header.hasAttribute("data-project-first-reveal-highlight")).toBe(true);
+    expect(windowFilterStore.getSnapshot().activeFilterId).toBe("all");
+    await act(async () => flushPreferenceWritesForTest());
+    expect(rpcCalls.filter(({ method }) => method === "setPreference")).toEqual(expect.arrayContaining([
+      { method: "setPreference", input: { key: "hiddenGroups", value: ["project:web"] } },
+      { method: "setPreference", input: { key: "collapsedSections", value: [] } },
+    ]));
+    expect(inspection.navigateCalls).toEqual([]);
+    expect(inspection.sdkCalls).toEqual([]);
+  });
+
+  it.each([
+    ["project", "hidden"], ["project", "pinned"], ["project", "archived"],
+    ["machine", "visible"], ["chronological", "visible"],
+  ] as const)("opens the personal project page when no personal group is available (%s / %s)", async (organizationMode, available) => {
+    const hidden = makeSidebarThread({ id: "personal-hidden", projectId: "personal", isHidden: true });
+    const visible = makeSidebarThread({ id: "personal-visible", projectId: "personal" });
+    const archived = available === "archived";
+    const threads = available === "visible" ? [hidden, visible]
+      : available === "pinned" ? [hidden, { ...visible, isPinned: true, pinnedAt: 1 }]
+      : archived ? [] : [hidden];
+    const { rpcCalls, inspection } = await mount({
+      showProjectlessFilter: false, organizationMode, hiddenGroups: ["threads"], collapsedSections: ["threads"],
+    }, threads, archived ? { sdk: { threads: {
+      get: async () => makeThreadResponse({ id: hidden.id, projectId: "personal", archivedAt: 1 }),
+    } } } : {});
+    act(() => windowFilterStore.setActiveFilterId("app-only"));
+    await reveal(hidden.id);
+    fireEvent.click(await screen.findByRole("button", { name: "Перейти к «Без проектов»" }));
+    await waitFor(() => expect(inspection.navigateCalls).toEqual([{ method: "toProject", projectId: "personal" }]));
+    expect(windowFilterStore.getSnapshot().activeFilterId).toBe("all");
+    await act(async () => flushPreferenceWritesForTest());
+    expect(rpcCalls.filter(({ method }) => method === "setPreference")).toEqual([]);
+  });
+
+  it("reports a position timeout without opening the personal project when the ordinary group exists", async () => {
+    const error = vi.spyOn(toast, "error");
+    const hidden = makeSidebarThread({ id: "personal-hidden", projectId: "personal", isHidden: true });
+    const visible = makeSidebarThread({ id: "personal-visible", projectId: "personal" });
+    const { inspection } = await mount({ showProjectlessFilter: false }, [hidden, visible]);
+    await reveal(hidden.id);
+    const button = await screen.findByRole("button", { name: "Перейти к «Без проектов»" });
+    const group = document.querySelector<HTMLElement>('[data-sidebar-visibility-group="threads"]')!;
+    expect(group).not.toBeNull();
+    vi.spyOn(group, "querySelector").mockReturnValue(null);
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(button);
+      await act(async () => vi.advanceTimersByTimeAsync(5200));
+      expect(error).toHaveBeenCalledWith(expect.stringContaining("Не удалось найти элемент"));
+      expect(inspection.navigateCalls).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("reads an unloaded archived thread to identify its project and can cancel without fetching archive pages", async () => {
     const get = vi.fn(async () => makeThreadResponse({ id: "unloaded", projectId: "app", archivedAt: 1 }));
     const fetchNextPage = vi.fn(async () => {});

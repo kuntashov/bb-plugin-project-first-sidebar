@@ -35,7 +35,7 @@ Compatible npm updates can be checked and applied with `bb plugin outdated` and 
 
 ## Filters and icons
 
-The ⋯ menu beside the filter toolbar opens the editor. Custom rules select ordinary projects by ID or match full project names with case-insensitive globs. Spaces in patterns are significant; `?` matches one Unicode code point. Personal-project threads are excluded from custom membership; use the projectless built-in filter when appropriate.
+The ⋯ menu beside the filter toolbar opens the editor. Custom rules select ordinary projects by ID or match full project names with case-insensitive globs. Spaces in patterns are significant; `?` matches one Unicode code point. Personal-project threads appear under All and the projectless built-in filter. Hide the projectless button from both the sidebar and quick search under **Встроенные фильтры** in the plugin settings.
 
 Uploaded icons are static PNG files up to **64 KiB**, with each dimension from **1 to 512 px**, rendered in a **16×16 px** box. The shared document has a **255 KiB** total budget. Built-in icons use BB's own public icon renderer.
 

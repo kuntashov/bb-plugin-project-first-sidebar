@@ -4,6 +4,12 @@ import { BUILT_IN_FILTER_IDS } from "../../shared/filters.js";
 export const ALL_FILTER_ID = BUILT_IN_FILTER_IDS[0];
 export const PROJECTLESS_FILTER_ID = BUILT_IN_FILTER_IDS[1];
 
+export type BuiltInFilterId = typeof ALL_FILTER_ID | typeof PROJECTLESS_FILTER_ID;
+
+function isBuiltInFilterId(id: ActiveFilterId): id is BuiltInFilterId {
+  return id === ALL_FILTER_ID || id === PROJECTLESS_FILTER_ID;
+}
+
 // User filter IDs are opaque strings; availability is enforced against the live document.
 export type ActiveFilterId = string;
 
@@ -13,6 +19,7 @@ export interface FilterListRpc {
 
 export interface WindowFilterSnapshot {
   activeFilterId: ActiveFilterId;
+  hiddenBuiltInFilterIds: ReadonlySet<BuiltInFilterId>;
   document: FilterDocumentV1 | null;
   status: "loading" | "ready" | "error";
   isRefreshing: boolean;
@@ -26,6 +33,8 @@ export interface WindowFilterStore {
   getSnapshot(): WindowFilterSnapshot;
   subscribe(listener: () => void): () => void;
   setActiveFilterId(filterId: ActiveFilterId): void;
+  setBuiltInFilterVisible(filterId: BuiltInFilterId, visible: boolean): void;
+  isFilterAvailable(filterId: ActiveFilterId): boolean;
   invalidate(): void;
   reconnect(): void;
 }
@@ -38,6 +47,7 @@ function describeReadError(result: Extract<FilterReadResult, { status: "error" }
 export function createWindowFilterStore(): WindowFilterStore {
   let snapshot: WindowFilterSnapshot = {
     activeFilterId: ALL_FILTER_ID,
+    hiddenBuiltInFilterIds: new Set(),
     document: null,
     status: "loading",
     isRefreshing: false,
@@ -61,6 +71,11 @@ export function createWindowFilterStore(): WindowFilterStore {
     listeners.forEach((listener) => listener());
   };
 
+  const isFilterAvailable = (filterId: ActiveFilterId): boolean =>
+    isBuiltInFilterId(filterId)
+      ? !snapshot.hiddenBuiltInFilterIds.has(filterId)
+      : snapshot.document?.filters.some((filter) => filter.id === filterId) ?? false;
+
   const applyDocument = (
     document: FilterDocumentV1,
     requestId: number,
@@ -73,8 +88,7 @@ export function createWindowFilterStore(): WindowFilterStore {
     const nextDocument = acceptsDocument ? document : snapshot.document;
     if (nextDocument === null) return;
     const activeWasRemoved =
-      snapshot.activeFilterId !== ALL_FILTER_ID
-      && snapshot.activeFilterId !== PROJECTLESS_FILTER_ID
+      !isBuiltInFilterId(snapshot.activeFilterId)
       && !nextDocument.filters.some((filter) => filter.id === snapshot.activeFilterId);
     publish({
       ...snapshot,
@@ -187,11 +201,20 @@ export function createWindowFilterStore(): WindowFilterStore {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
+    isFilterAvailable,
+    setBuiltInFilterVisible(filterId, visible) {
+      if (filterId === ALL_FILTER_ID || isFilterAvailable(filterId) === visible) return;
+      const hiddenBuiltInFilterIds = new Set(snapshot.hiddenBuiltInFilterIds);
+      if (visible) hiddenBuiltInFilterIds.delete(filterId);
+      else hiddenBuiltInFilterIds.add(filterId);
+      publish({
+        ...snapshot,
+        hiddenBuiltInFilterIds,
+        activeFilterId: !visible && snapshot.activeFilterId === filterId ? ALL_FILTER_ID : snapshot.activeFilterId,
+      });
+    },
     setActiveFilterId(filterId) {
-      if (filterId !== ALL_FILTER_ID && filterId !== PROJECTLESS_FILTER_ID) {
-        if (!snapshot.document?.filters.some((filter) => filter.id === filterId)) return;
-      }
-      if (filterId === snapshot.activeFilterId) return;
+      if (!isFilterAvailable(filterId) || filterId === snapshot.activeFilterId) return;
       publish({
         ...snapshot,
         activeFilterId: filterId,

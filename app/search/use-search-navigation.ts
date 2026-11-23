@@ -32,6 +32,7 @@ export function useSearchNavigation() {
     if (!snapshot.document || snapshot.status !== "ready" || snapshot.isRefreshing || snapshot.document.revision !== selection.revision) {
       throw new Error("Фильтры обновились. Проверьте результат и повторите Enter.");
     }
+    if (!windowFilterStore.isFilterAvailable(selection.filterId)) throw new Error("Выбранный фильтр недоступен.");
     if (target.deletedAt !== null || (!selection.includeArchived && target.archivedAt !== null)) {
       throw new Error("Состояние треда изменилось. Обновите список.");
     }
@@ -66,6 +67,7 @@ export function useSearchNavigation() {
     signal.throwIfAborted();
     const snapshot = windowFilterStore.getSnapshot();
     if (snapshot.status !== "ready" || snapshot.isRefreshing || snapshot.document?.revision !== selection.revision) throw new Error("Фильтры обновились. Повторите поиск.");
+    if (!windowFilterStore.isFilterAvailable(selection.filterId)) throw new Error("Выбранный фильтр недоступен.");
     windowFilterStore.setActiveFilterId(selection.filterId);
     const lifecycles = new Set(store.get(sidebarThreadLifecyclesAtom));
     for (const thread of chain) lifecycles.add(thread.archivedAt !== null ? "archived" : "active");

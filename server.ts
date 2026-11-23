@@ -37,6 +37,7 @@ import {
   parsePreferenceValue,
   parseStoredPreferenceValue,
   PREFERENCE_KEYS,
+  THREAD_LIST_PREFERENCE_KEYS,
   PREFERENCES_CHANGED_CHANNEL,
   preferenceDefinitions,
   type PreferenceKey,
@@ -56,6 +57,14 @@ const preferenceValuesSchema = z.object(
     PREFERENCE_KEYS.map((key) => [key, preferenceDefinitions[key].schema]),
   ) as { [Key in PreferenceKey]: (typeof preferenceDefinitions)[Key]["schema"] },
 );
+
+const threadListPreferencesResponseSchema = z.strictObject({
+  preferences: z.strictObject(
+    Object.fromEntries(
+      THREAD_LIST_PREFERENCE_KEYS.map((key) => [key, preferenceDefinitions[key].schema]),
+    ) as Pick<typeof preferenceValuesSchema.shape, (typeof THREAD_LIST_PREFERENCE_KEYS)[number]>,
+  ),
+});
 
 const importResultSchema = z.object({
   state: z.enum(["imported", "absent", "failed"]),
@@ -341,11 +350,11 @@ export async function importThreadListPreferences(bb: BbPluginApi): Promise<Impo
       pluginId: "thread-list",
       method: "listPreferences",
       input: null,
-      outputSchema: z.object({ preferences: preferenceValuesSchema }).strict(),
+      outputSchema: threadListPreferencesResponseSchema,
     });
-    const { preferences } = z.object({ preferences: preferenceValuesSchema }).strict().parse(response);
+    const { preferences } = threadListPreferencesResponseSchema.parse(response);
     const store = createPreferenceStore(bb);
-    for (const key of PREFERENCE_KEYS) {
+    for (const key of THREAD_LIST_PREFERENCE_KEYS) {
       if (await bb.storage.kv.get<unknown>(kvKey(key)) !== undefined) continue;
       await store.write(key, preferences[key]);
       imported.push(key);

@@ -5,6 +5,8 @@ import {
   useRealtime,
   useRpc,
 } from "@get-bb/plugin-sdk/app";
+import { PROJECTLESS_FILTER_ID, windowFilterStore } from "../filters/filter-store.js";
+import { sidebarShowProjectlessFilterAtom } from "./atoms.js";
 import type { projectFirstSidebarRpcContract } from "../../server.js";
 import { PREFERENCES_CHANGED_CHANNEL } from "../../shared/preferences.js";
 import {
@@ -27,6 +29,11 @@ export function usePreferencesSync(): void {
   const pluginId = experimental_usePluginId();
   useEffect(() => {
     attachPreferencesStore(store, pluginId);
+    const updateFilterVisibility = () => {
+      windowFilterStore.setBuiltInFilterVisible(PROJECTLESS_FILTER_ID, store.get(sidebarShowProjectlessFilterAtom));
+    };
+    const unsubscribeVisibility = store.sub(sidebarShowProjectlessFilterAtom, updateFilterVisibility);
+    updateFilterVisibility();
     syncOwnerCount += 1;
     if (syncOwnerCount === 1) {
       hydratePreferencesFromMirror();
@@ -39,6 +46,7 @@ export function usePreferencesSync(): void {
       });
     }
     return () => {
+      unsubscribeVisibility();
       syncOwnerCount -= 1;
     };
   }, [pluginId, rpc, store]);

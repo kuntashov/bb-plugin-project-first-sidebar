@@ -50,3 +50,10 @@ export const sidebarShowProviderIconsAtom =
 
 export const sidebarShowExecutionHighlightingAtom =
   createSyncedPreferenceAtom("showExecutionHighlighting");
+
+export const sidebarShowProjectlessFilterAtom =
+  createSyncedPreferenceAtom("showProjectlessFilter");
+export const sidebarShowUnreadFilterAtom =
+  createSyncedPreferenceAtom("showUnreadFilter");
+export const sidebarShowWaitingForActionFilterAtom =
+  createSyncedPreferenceAtom("showWaitingForActionFilter");

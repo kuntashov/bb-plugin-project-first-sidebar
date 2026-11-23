@@ -19,6 +19,7 @@ import {
   PROJECTLESS_FILTER_ID,
   windowFilterStore,
   type ActiveFilterId,
+  type BuiltInFilterId,
   type WindowFilterStore,
 } from "./filter-store.js";
 import { useFilterDocumentSync } from "./use-filter-document-sync.js";
@@ -35,7 +36,7 @@ interface FilterOption {
   icon?: IconDefinition;
 }
 
-const BUILT_IN_FILTERS: readonly FilterOption[] = [
+const BUILT_IN_FILTERS: readonly (FilterOption & { id: BuiltInFilterId })[] = [
   { id: ALL_FILTER_ID, name: "Все" },
   { id: PROJECTLESS_FILTER_ID, name: "Без проектов", icon: { kind: "builtin", name: "Folder" } },
 ];
@@ -47,7 +48,7 @@ export function ProjectFilterPanel({
   useFilterDocumentSync(store);
   const snapshot = useWindowFilterSnapshot(store);
   const options: FilterOption[] = [
-    ...BUILT_IN_FILTERS,
+    ...BUILT_IN_FILTERS.filter(({ id }) => !snapshot.hiddenBuiltInFilterIds.has(id)),
     ...(snapshot.document?.filters.map((filter) => ({
       id: filter.id,
       name: filter.name,
@@ -71,6 +72,13 @@ export function ProjectFilterPanel({
       radioRefs.current.get(ALL_FILTER_ID)?.focus();
     }
   }, [snapshot.removalVersion, snapshot.removedActiveFilterId]);
+
+  useLayoutEffect(() => {
+    const focusedId = focusedFilterId.current;
+    if (focusedId !== null && !options.some((option) => option.id === focusedId)) {
+      radioRefs.current.get(ALL_FILTER_ID)?.focus();
+    }
+  });
 
   const selectAndFocus = (option: FilterOption) => {
     store.setActiveFilterId(option.id);

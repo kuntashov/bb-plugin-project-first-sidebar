@@ -4,6 +4,7 @@ import { useCallback, useRef, useState } from "react";
 import { definePluginApp, type PluginThreadListProps } from "@get-bb/plugin-sdk/app";
 import { CompactViewportOverrideProvider } from "@/components/ui/hooks/use-compact-viewport";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { BuiltInFilterVisibilitySettings } from "./app/preferences/BuiltInFilterVisibilitySettings.js";
 import { ImportPreferences } from "./app/preferences/ImportPreferences.js";
 import { PreferencesSync } from "./app/preferences/PreferencesSync.js";
 import { ProjectList } from "./app/list/ProjectList.js";
@@ -79,6 +80,11 @@ export default definePluginApp((app) => {
     id: "project-first-sidebar-filters",
     title: "Фильтры проектов",
     component: ProjectFilterEditor,
+  });
+  app.slots.settingsSection({
+    id: "built-in-filter-visibility",
+    title: "Встроенные фильтры",
+    component: BuiltInFilterVisibilitySettings,
   });
   app.slots.settingsSection({ id: "execution-index", title: "Execution index", component: RebuildSettings });
   app.slots.experimental_threadList({

@@ -8,7 +8,7 @@ import {
   buildPinnedSidebarState,
   type PinnedSidebarState,
 } from "./pinned-sidebar-threads.js";
-import { createSidebarProjectIdResolver } from "./project-thread-groups.js";
+import { createSidebarProjectIdResolver, isSidebarProjectThread } from "./project-thread-groups.js";
 
 export interface FullSidebarSnapshot {
   projects: readonly PluginSidebarProject[];
@@ -38,6 +38,18 @@ export interface ProjectedSidebarData {
     pinned: PinnedSidebarState;
   };
   projectionKey: string;
+}
+
+export function hasProjectModeThreadsSection(
+  full: ProjectedSidebarData["full"],
+  personalProjectId: string | null,
+): boolean {
+  return full.ordinaryProjects.length === 0
+    || (personalProjectId !== null && full.threads.some((thread) =>
+      isSidebarProjectThread(thread)
+      && full.effectiveProjectIdByThreadId.get(thread.id) === personalProjectId
+      && !full.effectivePinnedThreadIds.has(thread.id),
+    ));
 }
 
 export function matchesProjectNameGlob(name: string, glob: string): boolean {

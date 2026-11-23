@@ -1,19 +1,42 @@
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { describe, expect, it, vi } from "vitest";
 import plugin, { importThreadListPreferences } from "./server.js";
-import { defaultPreferences, PREFERENCE_KEYS } from "./shared/preferences.js";
+import { defaultPreferences } from "./shared/preferences.js";
 
 const PREFIX = "project-first-sidebar:preference:";
 const MARKER = "project-first-sidebar:import:thread-list:v1";
+
+const threadListPreferences = {
+  showProviderIcons: true,
+  threadLifecycles: ["active"],
+  organizationMode: "chronological",
+  environmentGrouping: "auto",
+  groupByReadStatus: false,
+  chronologicalSort: "updated",
+  sortDirection: "default",
+  sectionOrder: ["pinned", "projects", "threads"],
+  manualSectionOrder: ["pinned", "sections", "threads"],
+  machineSectionOrder: ["pinned", "machines", "threads"],
+  hiddenGroups: [],
+  rowActions: ["bb--core/archive"],
+  collapsedSections: [],
+  collapsedProjects: [],
+  collapsedThreads: [],
+  collapsedEnvironments: [],
+  collapsedThreadSections: [],
+  collapsedMachines: [],
+};
 
 function setup(options: { absent?: boolean; disabled?: boolean; response?: unknown; fail?: string } = {}) {
   const list = vi.fn(async () => {
     if (options.fail === "list") throw new Error("inventory offline");
     return { plugins: options.absent ? [] : [{ id: "thread-list", enabled: !options.disabled }] };
   });
-  const callRpc = vi.fn(async () => {
+  const callRpc = vi.fn(async ({ outputSchema }: { outputSchema?: { parse(value: unknown): unknown } } = {}) => {
     if (options.fail === "rpc") throw new Error("source read failed");
-    return options.response ?? { preferences: { ...defaultPreferences(), organizationMode: "chronological" } };
+    const response = options.response ?? { preferences: threadListPreferences };
+    outputSchema?.parse(response);
+    return response;
   });
   const host = createFakePluginHost({ pluginId: "project-first-sidebar", sdk: { plugins: { list, callRpc } } });
   return { ...host, list, callRpc };
@@ -22,12 +45,19 @@ function setup(options: { absent?: boolean; disabled?: boolean; response?: unkno
 describe("thread-list effective preferences snapshot", () => {
   it("imports source defaults, preserves own settings and remaps only the normalized move key", async () => {
     const { bb, callRpc } = setup({ response: { preferences: {
-      ...defaultPreferences(), organizationMode: "machine", rowActions: ["move", "core/pin", "other/move"],
+      ...threadListPreferences, organizationMode: "machine", rowActions: ["move", "core/pin", "other/move"],
     } } });
     await bb.storage.kv.set(`${PREFIX}hiddenGroups`, ["project:mine"]);
+    await bb.storage.kv.set(`${PREFIX}showExecutionHighlighting`, true);
+    await bb.storage.kv.set(`${PREFIX}showProjectlessFilter`, false);
     const result = await importThreadListPreferences(bb);
     expect(result.state).toBe("imported");
-    expect(result.imported).toHaveLength(PREFERENCE_KEYS.length - 1);
+    expect(result.imported).toEqual(Object.keys(threadListPreferences).filter((key) => key !== "hiddenGroups"));
+    await expect(bb.storage.kv.get(`${PREFIX}showExecutionHighlighting`)).resolves.toBe(true);
+    await expect(bb.storage.kv.get(`${PREFIX}showProjectlessFilter`)).resolves.toBe(false);
+    for (const key of ["showUnreadFilter", "showWaitingForActionFilter"]) {
+      await expect(bb.storage.kv.get(PREFIX + key)).resolves.toBeUndefined();
+    }
     await expect(bb.storage.kv.get(`${PREFIX}organizationMode`)).resolves.toBe("machine");
     await expect(bb.storage.kv.get(`${PREFIX}hiddenGroups`)).resolves.toEqual(["project:mine"]);
     await expect(bb.storage.kv.get(`${PREFIX}rowActions`)).resolves.toEqual(["project-first-sidebar/move", "bb--core/pin", "other/move"]);
@@ -50,8 +80,9 @@ describe("thread-list effective preferences snapshot", () => {
     { disabled: true, state: "failed" },
     { fail: "list", state: "failed" },
     { fail: "rpc", state: "failed" },
-    { response: { preferences: { ...defaultPreferences(), collapsedMachines: false } }, state: "failed" },
+    { response: { preferences: { ...threadListPreferences, collapsedMachines: false } }, state: "failed" },
     { response: { preferences: { organizationMode: "machine" } }, state: "failed" },
+    { response: { preferences: { ...threadListPreferences, showUnreadFilter: true } }, state: "failed" },
   ])("distinguishes missing source and failures without committing a marker: %j", async ({ state, ...options }) => {
     const { bb } = setup(options);
     const result = await importThreadListPreferences(bb);
@@ -96,7 +127,7 @@ describe("thread-list effective preferences snapshot", () => {
     const failed = await harness.behavior.runCli(["prefs", "import", "--json"]);
     expect(failed.exitCode).toBe(1);
     expect(JSON.parse(failed.stdout).state).toBe("failed");
-    callRpc.mockResolvedValue({ preferences: { ...defaultPreferences(), organizationMode: "machine" } });
+    callRpc.mockResolvedValue({ preferences: { ...threadListPreferences, organizationMode: "machine" } });
     await expect(harness.behavior.callRpc("importPreferences", null)).resolves.toMatchObject({ state: "imported" });
     expect((await harness.behavior.runCli(["prefs", "import", "--json"])).exitCode).toBe(0);
   });
@@ -115,12 +146,12 @@ it("deduplicates move aliases after legacy normalization and preserves third-par
 it("serializes an explicit import retry with a user's preference write", async () => {
   const { bb, harness, callRpc } = setup({ fail: "rpc" });
   await plugin(bb);
-  let finishRead!: (value: { preferences: ReturnType<typeof defaultPreferences> }) => void;
-  callRpc.mockImplementationOnce(() => new Promise<{ preferences: ReturnType<typeof defaultPreferences> }>((resolve) => { finishRead = resolve; }));
+  let finishRead!: (value: { preferences: typeof threadListPreferences }) => void;
+  callRpc.mockImplementationOnce(() => new Promise<{ preferences: typeof threadListPreferences }>((resolve) => { finishRead = resolve; }));
   const importing = harness.behavior.callRpc("importPreferences", null);
   await vi.waitFor(() => expect(finishRead).toBeTypeOf("function"));
   const writing = harness.behavior.callRpc("setPreference", { key: "organizationMode", value: "machine" });
-  finishRead({ preferences: { ...defaultPreferences(), organizationMode: "chronological" } });
+  finishRead({ preferences: { ...threadListPreferences, organizationMode: "chronological" } });
   await importing;
   await writing;
   await expect(bb.storage.kv.get(`${PREFIX}organizationMode`)).resolves.toBe("machine");

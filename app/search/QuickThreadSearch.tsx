@@ -55,12 +55,13 @@ function SearchSession({ prepare, accept, close }: {
   const [scrollTop, setScrollTop] = useState(0);
   const listId = useId();
   const source = useSearchData(includeArchived);
-  const { document } = snapshot;
+  const { document, hiddenBuiltInFilterIds } = snapshot;
+  const showProjectless = !hiddenBuiltInFilterIds.has(PROJECTLESS_FILTER_ID);
   const filters = useMemo<Array<{ id: string; name: string; icon?: IconDefinition }>>(() => [
     { id: ALL_FILTER_ID, name: "Все" },
-    { id: PROJECTLESS_FILTER_ID, name: "Без проектов", icon: { kind: "builtin" as const, name: "Folder" as const } },
+    ...(showProjectless ? [{ id: PROJECTLESS_FILTER_ID, name: "Без проектов", icon: { kind: "builtin" as const, name: "Folder" as const } }] : []),
     ...(document?.filters ?? []).map((filter) => ({ id: filter.id, name: filter.name, icon: filter.icon })),
-  ], [document]);
+  ], [document, showProjectless]);
   const chosenFilter = filters.find((filter) => filter.id === filterId);
   const candidates = useMemo(() => includeArchived ? [...source.active, ...source.archived] : source.active, [includeArchived, source.active, source.archived]);
   const rawTitles = useMemo(() => [...new Set(candidates.map(rawTitle))], [candidates]);
@@ -132,7 +133,26 @@ function SearchSession({ prepare, accept, close }: {
     else if (top + THREAD_ROW_HEIGHT > element.scrollTop + LIST_HEIGHT) element.scrollTop = top + THREAD_ROW_HEIGHT - LIST_HEIGHT;
     setScrollTop(element.scrollTop);
   }, [selectionKey, selectedIndex, options.length, query, filterId]);
-  useEffect(() => { input.current?.focus(); }, []);
+  useLayoutEffect(() => {
+    if (filterId === null) input.current?.focus();
+    if (filterId !== PROJECTLESS_FILTER_ID) return;
+    const resetIfHidden = () => {
+      if (windowFilterStore.isFilterAvailable(filterId)) return;
+      operation.current?.abort();
+      operation.current = null;
+      setFilterId(null);
+      setQuery("");
+      setIncludeArchived(false);
+      setSelectedId(null);
+      setError(null);
+      setSubmitting(false);
+      setScrollTop(0);
+      if (list.current) list.current.scrollTop = 0;
+    };
+    const unsubscribe = windowFilterStore.subscribe(resetIfHidden);
+    resetIfHidden();
+    return unsubscribe;
+  }, [filterId]);
   useEffect(() => () => operation.current?.abort(), []);
   // A data/filter invalidation cannot complete an old Enter operation later.
   useEffect(() => {
@@ -256,7 +276,10 @@ export function QuickThreadSearch() {
     };
     const stopFilters = windowFilterStore.subscribe(() => {
       const snapshot = windowFilterStore.getSnapshot();
-      if (snapshot.status !== "ready" || snapshot.isRefreshing || (pending.current && snapshot.document?.revision !== pending.current.selection.revision)) invalidate();
+      const selection = pending.current?.selection;
+      if (snapshot.status !== "ready" || snapshot.isRefreshing || (selection &&
+        (snapshot.document?.revision !== selection.revision || !windowFilterStore.isFilterAvailable(selection.filterId))
+      )) invalidate();
     });
     const disposers = [
       sdk.subscribe({ event: "thread:changed", callback: (event) => { if (changesSearchMetadata(event.changes)) invalidate(); } }),

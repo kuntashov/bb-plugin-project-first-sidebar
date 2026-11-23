@@ -124,7 +124,7 @@ import {
 } from "../model/use-sidebar-data.js";
 import { ProjectFilterPanel } from "../filters/ProjectFilterPanel.js";
 import { useWindowFilterSnapshot } from "../filters/use-filter-snapshot.js";
-import { projectSidebarSnapshot } from "../model/sidebar-projection.js";
+import { hasProjectModeThreadsSection, projectSidebarSnapshot } from "../model/sidebar-projection.js";
 import { SidebarProjectionKeyProvider } from "../filters/sidebar-projection-context.js";
 
 export interface ProjectListProps {
@@ -1406,19 +1406,9 @@ function ProjectListComponent({
               : null
           : null
       : null;
-  const fullProjectSectionIds = sidebarData.projects
-    .filter((project) => !project.isPersonal)
+  const fullProjectSectionIds = projection.full.ordinaryProjects
     .map((project) => buildSidebarEntitySectionId("project", project.id));
-  const hasFullThreadsSection =
-    fullProjectSectionIds.length === 0
-    || (personalProjectId !== null
-      && sidebarData.threads.some(
-        (thread) =>
-          isSidebarProjectThread(thread)
-          && projection.full.effectiveProjectIdByThreadId.get(thread.id)
-            === personalProjectId
-          && !projection.full.effectivePinnedThreadIds.has(thread.id),
-      ));
+  const hasFullThreadsSection = hasProjectModeThreadsSection(projection.full, personalProjectId);
   const preferencesReady = usePreferencesReady();
   const threadListStatus = toThreadListStatus(status);
   const selectedThreadId = activeThreadId ?? undefined;

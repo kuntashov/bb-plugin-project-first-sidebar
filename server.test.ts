@@ -1,7 +1,7 @@
 import { createFakePluginHost } from "@get-bb/plugin-sdk/testing";
 import { describe, expect, it } from "vitest";
 import plugin, { importThreadListPreferences } from "./server.js";
-import { defaultPreferences } from "./shared/preferences.js";
+import { defaultPreferences, THREAD_LIST_PREFERENCE_KEYS } from "./shared/preferences.js";
 
 const PLUGIN_ID = "project-first-sidebar";
 
@@ -22,6 +22,23 @@ function setup(options: {
 }
 
 describe("thread-list preferences rpc", () => {
+  it.each(["showProjectlessFilter", "showUnreadFilter", "showWaitingForActionFilter"])("defaults, saves and resets %s independently", async (key) => {
+    const { bb, harness } = setup();
+    await plugin(bb);
+    const visible = { showProjectlessFilter: true, showUnreadFilter: true, showWaitingForActionFilter: true };
+    const list = () => harness.behavior.callRpc("listPreferences", null);
+    await expect(list()).resolves.toMatchObject({ preferences: visible });
+    await expect(harness.behavior.callRpc("setPreference", { key, value: false })).resolves.toEqual({ key, value: false });
+    await expect(bb.storage.kv.get("project-first-sidebar:preference:" + key)).resolves.toBe(false);
+    await expect(list()).resolves.toMatchObject({ preferences: { ...visible, [key]: false } });
+    await expect(harness.behavior.callRpc("resetPreference", { key })).resolves.toEqual({ key, value: true });
+    await expect(list()).resolves.toMatchObject({ preferences: visible });
+    expect(harness.realtimeSignals).toEqual([
+      { channel: "project-first-sidebar.preferences", payload: { key, value: false } },
+      { channel: "project-first-sidebar.preferences", payload: { key, value: true } },
+    ]);
+  });
+
   it("lists defaults on a fresh install and round-trips a valid write", async () => {
     const { bb, harness } = setup();
     await plugin(bb);
@@ -173,7 +190,8 @@ describe("thread-list preferences rpc", () => {
 describe("migration from Thread-list effective preferences", () => {
   it("copies defaults once and never overwrites a value the plugin already has", async () => {
     const { bb } = setup({ preferences: {
-      ...defaultPreferences(), organizationMode: "machine", sectionOrder: ["proj_a"],
+      ...Object.fromEntries(THREAD_LIST_PREFERENCE_KEYS.map((key) => [key, defaultPreferences()[key]])),
+      organizationMode: "machine", sectionOrder: ["proj_a"],
     } });
     await bb.storage.kv.set("project-first-sidebar:preference:sectionOrder", ["proj_mine"]);
     const first = await importThreadListPreferences(bb);

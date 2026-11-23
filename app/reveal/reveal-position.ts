@@ -54,11 +54,17 @@ export async function positionRevealThread(root: HTMLElement, threadId: string, 
   return row;
 }
 
-export function positionRevealProject(root: HTMLElement, projectId: string, personal: boolean, signal: AbortSignal): Promise<HTMLElement> {
+export function positionRevealProject(
+  root: HTMLElement,
+  projectId: string,
+  destination: "project" | "personal-filter" | "personal-section",
+  signal: AbortSignal,
+): Promise<HTMLElement> {
   return waitForReveal(() => {
+    const groupId = destination === "personal-section" ? "threads" : `project:${projectId}`;
     const group = Array.from(root.querySelectorAll<HTMLElement>("[data-sidebar-visibility-group]"))
-      .find((item) => item.dataset.sidebarVisibilityGroup === (personal ? "threads" : `project:${projectId}`));
-    const target = personal
+      .find((item) => item.dataset.sidebarVisibilityGroup === groupId && !item.closest('[inert], [data-sidebar-overflow]'));
+    const target = destination === "personal-filter"
       ? root.querySelector<HTMLElement>('[data-filter-id="projectless"]')
       : group?.querySelector<HTMLElement>('[data-sidebar-sticky-tier="label"] button[aria-expanded]');
     if (!target) return null;

@@ -90,10 +90,7 @@ function definePreference<Schema extends z.ZodTypeAny>(
   return { schema, defaultValue, description, legacyKey };
 }
 
-export const preferenceDefinitions = {
-  showExecutionHighlighting: definePreference(
-    z.boolean(), false, "Highlight titles by the last accepted execution configuration.", null,
-  ),
+const threadListPreferenceDefinitions = {
   showProviderIcons: definePreference(
     z.boolean(),
     true,
@@ -211,6 +208,26 @@ export const preferenceDefinitions = {
     [],
     "Machine ids whose rows are collapsed.",
     null,
+  ),
+} as const;
+
+export const THREAD_LIST_PREFERENCE_KEYS = Object.keys(
+  threadListPreferenceDefinitions,
+) as (keyof typeof threadListPreferenceDefinitions)[];
+
+export const preferenceDefinitions = {
+  ...threadListPreferenceDefinitions,
+  showExecutionHighlighting: definePreference(
+    z.boolean(), false, "Highlight titles by the last accepted execution configuration.", null,
+  ),
+  showProjectlessFilter: definePreference(
+    z.boolean(), true, "Show the No projects filter.", null,
+  ),
+  showUnreadFilter: definePreference(
+    z.boolean(), true, "Show the All unread filter.", null,
+  ),
+  showWaitingForActionFilter: definePreference(
+    z.boolean(), true, "Show the Waiting for action filter.", null,
   ),
 } as const;
 

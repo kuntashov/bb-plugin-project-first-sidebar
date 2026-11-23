@@ -8,10 +8,10 @@ import type { PluginBrowserBbSdk, PluginSidebarThreadsState } from "@get-bb/plug
 import { QuickThreadSearch, requestQuickThreadSearch } from "./QuickThreadSearch.js";
 import { entry, uiPreferences } from "./test-fixtures.js";
 import { makePluginProject, makeSidebarThread } from "../model/fixtures.js";
-import { defaultPreferences } from "../../shared/preferences.js";
+import { defaultPreferences, PREFERENCES_CHANGED_CHANNEL } from "../../shared/preferences.js";
 import { defaultFilterDocument } from "../../shared/filters.js";
 import { windowFilterStore } from "../filters/filter-store.js";
-import { resetPreferencesSyncForTest, setPreferencesMirrorStorageForTest } from "../preferences/preferences-sync.js";
+import { flushPreferenceWritesForTest, resetPreferencesSyncForTest, setPreferencesMirrorStorageForTest } from "../preferences/preferences-sync.js";
 
 let restoreSidebarHook: (() => void) | null = null;
 const app = await loadPluginApp(() => import("../../app.js"));
@@ -76,7 +76,87 @@ async function chooseFilter() {
   return screen.getByRole("combobox", { name: "Найти тред" });
 }
 
+const personalProject = { ...project, id: "personal", name: "Personal", kind: "personal" as const };
+
+function mountPersonalSearch(
+  target: ReturnType<typeof entry>,
+  get = vi.fn(async () => makeThreadResponse(target)),
+) {
+  const update = vi.fn(async () => makeThreadResponse({ ...target, visibility: "visible" }));
+  return mount({
+    sidebarThreads: {
+      status: "ready", sections: [],
+      projects: [makePluginProject({ id: "personal", isPersonal: true })],
+      threads: target.archivedAt === null && target.visibility !== "hidden"
+        ? [makeSidebarThread({ id: target.id, projectId: "personal", title: target.title })] : [],
+    },
+    sdk: {
+      subscribe: () => () => {}, projects: { list: async () => [personalProject] },
+      threads: {
+        list: async ({ offset, archived } = {}) => !offset && !!archived === (target.archivedAt !== null) ? [target] : [],
+        get, update,
+      },
+    },
+  }).then(({ view }) => ({ view, update }));
+}
+
+async function choosePersonalFilter() {
+  fireEvent.click(screen.getByRole("option", { name: "Без проектов" }));
+  return screen.findByRole("combobox", { name: "Найти тред" });
+}
+
 describe("keyboard quick navigation", () => {
+  it("returns to filter choice and aborts an in-flight personal search when the filter is hidden", async () => {
+    const target = entry({ id: "personal-thread", projectId: "personal", title: "Личный тред" });
+    let resolveTarget!: (row: ReturnType<typeof makeThreadResponse>) => void;
+    const get = vi.fn(() => new Promise<ReturnType<typeof makeThreadResponse>>((resolve) => { resolveTarget = resolve; }));
+    const { view } = await mountPersonalSearch(target, get);
+    const input = await choosePersonalFilter();
+    await screen.findByRole("option", { name: /Личный тред/ });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await screen.findByText("Открытие треда…");
+    await view.behavior.emitRealtime(PREFERENCES_CHANGED_CHANNEL, { key: "showProjectlessFilter", value: false });
+    expect(screen.queryByRole("option", { name: "Без проектов" })).toBeNull();
+    expect(document.activeElement).toBe(screen.getByRole("combobox", { name: "Выбрать фильтр" }));
+    await act(async () => resolveTarget(makeThreadResponse(target)));
+    expect(view.inspection.navigateCalls).toEqual([]);
+  });
+
+  it("cancels accepted personal search before commit when the preference changes during close", async () => {
+    const finish = closingAnimation();
+    const target = entry({ id: "personal-archive", projectId: "personal", title: "Личный архив", visibility: "hidden", archivedAt: 1 });
+    const { view, update } = await mountPersonalSearch(target);
+    const input = await choosePersonalFilter();
+    fireEvent.keyDown(input, { code: "KeyA", altKey: true });
+    await screen.findByRole("option", { name: /Личный архив/ });
+    const dialog = screen.getByRole("dialog");
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(dialog.getAttribute("data-state")).toBe("closed"));
+    expect(dialog.isConnected).toBe(true);
+    await view.behavior.emitRealtime(PREFERENCES_CHANGED_CHANNEL, { key: "showProjectlessFilter", value: false });
+    finish(dialog);
+    await waitFor(() => expect(dialog.isConnected).toBe(false));
+    await act(async () => flushPreferenceWritesForTest());
+    expect(view.inspection.navigateCalls).toEqual([]);
+    expect(update).not.toHaveBeenCalled();
+    expect(view.rpcCalls.filter(({ method }) => method === "setPreference")).toEqual([]);
+    expect(windowFilterStore.getSnapshot().activeFilterId).toBe("all");
+  });
+
+  it("opens and focuses a personal result from All while the personal filter is hidden", async () => {
+    const target = entry({ id: "personal-thread", projectId: "personal", title: "Личный тред" });
+    const { view } = await mountPersonalSearch(target);
+    await view.behavior.emitRealtime(PREFERENCES_CHANGED_CHANNEL, { key: "showProjectlessFilter", value: false });
+    expect(screen.queryByRole("option", { name: "Без проектов" })).toBeNull();
+    fireEvent.click(screen.getByRole("option", { name: "Все" }));
+    const input = await screen.findByRole("combobox", { name: "Найти тред" });
+    await screen.findByRole("option", { name: /Личный тред/ });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(document.activeElement?.getAttribute("data-sidebar-thread-id")).toBe(target.id));
+    expect(view.inspection.navigateCalls).toContainEqual({ method: "toThread", threadId: target.id });
+    expect(windowFilterStore.getSnapshot().activeFilterId).toBe("all");
+  });
+
   it("shows filters first and finds threads absent from the loaded sidebar with literal spaces and background highlights", async () => {
     const { list } = await mount();
     expect(screen.getByRole("option", { name: "Рабочие" })).toBeTruthy();
