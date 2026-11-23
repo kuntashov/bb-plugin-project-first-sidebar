@@ -13,7 +13,9 @@ import { COARSE_POINTER_ICON_SIZE_CLASS } from "@/components/ui/coarse-pointer-s
 import { ClearFilterIcon } from "./ClearFilterIcon.js";
 import { FilterIcon } from "./FilterIcon.js";
 import { DEFAULT_FILTER_ICON, type FilterIcon as IconDefinition } from "../../shared/filter-icons.js";
+import { filterNameKey } from "../../shared/filters.js";
 import { cn } from "@/lib/utils";
+import { DYNAMIC_FILTERS, isDynamicFilterId, UNREAD_FILTER_ID, WAITING_FOR_ACTION_FILTER_ID } from "./dynamic-filter-ids.js";
 import {
   ALL_FILTER_ID,
   PROJECTLESS_FILTER_ID,
@@ -37,10 +39,18 @@ interface FilterOption {
   icon?: IconDefinition;
 }
 
-const BUILT_IN_FILTERS: readonly (FilterOption & { id: BuiltInFilterId })[] = [
+type BuiltInFilterOption = FilterOption & { id: BuiltInFilterId };
+
+const BUILT_IN_FILTERS: readonly BuiltInFilterOption[] = [
   { id: ALL_FILTER_ID, name: "Все" },
   { id: PROJECTLESS_FILTER_ID, name: "Без проектов", icon: { kind: "builtin", name: "Folder" } },
+  ...([UNREAD_FILTER_ID, WAITING_FOR_ACTION_FILTER_ID] as const).map<BuiltInFilterOption>((id) => ({
+    id,
+    name: DYNAMIC_FILTERS[id].name,
+    icon: { kind: "builtin", name: DYNAMIC_FILTERS[id].icon },
+  })),
 ];
+const builtInNameKeys = new Set(BUILT_IN_FILTERS.map(({ name }) => filterNameKey(name)));
 
 export function ProjectFilterPanel({
   store = windowFilterStore,
@@ -52,7 +62,7 @@ export function ProjectFilterPanel({
     ...BUILT_IN_FILTERS.filter(({ id }) => store.isFilterAvailable(id)),
     ...(snapshot.document?.filters.map((filter) => ({
       id: filter.id,
-      name: filter.name,
+      name: builtInNameKeys.has(filterNameKey(filter.name)) ? `${filter.name} (пользовательский фильтр)` : filter.name,
       icon: filter.icon ?? DEFAULT_FILTER_ICON,
     })) ?? []),
   ];
@@ -125,9 +135,10 @@ export function ProjectFilterPanel({
         >
           {options.map((option, index) => {
             const checked = option.id === snapshot.activeFilterId;
+            const dynamicKey = isDynamicFilterId(option.id) ? DYNAMIC_FILTERS[option.id].key : undefined;
             return (
               <button
-                key={option.id}
+                key={dynamicKey ? `built-in:${dynamicKey}` : `filter:${String(option.id)}`}
                 ref={(element) => {
                   if (element) radioRefs.current.set(option.id, element);
                   else radioRefs.current.delete(option.id);
@@ -138,7 +149,7 @@ export function ProjectFilterPanel({
                 title={option.name}
                 aria-checked={checked}
                 tabIndex={checked ? 0 : -1}
-                data-filter-id={option.id}
+                data-filter-id={typeof option.id === "string" ? option.id : undefined}
                 className={cn(
                   "inline-flex items-center max-w-full min-w-0 rounded-md border px-2 py-1 text-left text-xs leading-tight outline-none",
                   "whitespace-normal break-words [overflow-wrap:anywhere] focus-visible:ring-2 focus-visible:ring-sidebar-ring",

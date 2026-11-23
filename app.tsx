@@ -15,6 +15,8 @@ import { useSidebarThreadReveal } from "./app/list/useSidebarThreadReveal.js";
 import { ThreadReveal, requestThreadReveal } from "./app/reveal/ThreadReveal.js";
 import { QuickThreadSearch, requestQuickThreadSearch } from "./app/search/QuickThreadSearch.js";
 import { moveThreadAction } from "./app/rows/moveThreadAction.js";
+import { isDynamicFilterId } from "./app/filters/dynamic-filter-ids.js";
+import { useWindowFilterSnapshot } from "./app/filters/use-filter-snapshot.js";
 
 function ThreadList({
   activeThreadId,
@@ -31,11 +33,12 @@ function ThreadList({
     filterDialogTrigger.current?.focus();
   }, []);
   useSidebarThreadReveal();
+  const { activeFilterId } = useWindowFilterSnapshot();
   return (
     <CompactViewportOverrideProvider isCompactViewport={isCompactViewport}>
       <TooltipProvider>
         <PreferencesSync />
-        <ExecutionProjectionSync />
+        <ExecutionProjectionSync filterId={isDynamicFilterId(activeFilterId) ? activeFilterId : undefined} />
         <div data-project-first-sidebar="" className="contents">
           <ProjectList
             activeThreadId={activeThreadId}

@@ -4,10 +4,13 @@ import { useSdk, useBbNavigate } from "@get-bb/plugin-sdk/app";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { windowFilterStore, ALL_FILTER_ID, PROJECTLESS_FILTER_ID } from "../filters/filter-store.js";
+import { windowFilterStore, ALL_FILTER_ID, PROJECTLESS_FILTER_ID, type ActiveFilterId } from "../filters/filter-store.js";
+import { DYNAMIC_FILTERS, isDynamicFilterId } from "../filters/dynamic-filter-ids.js";
 import { useFilterDocumentSync } from "../filters/use-filter-document-sync.js";
+import { useWindowFilterSnapshot } from "../filters/use-filter-snapshot.js";
 import { hasProjectModeThreadsSection, projectSidebarSnapshot } from "../model/sidebar-projection.js";
 import { useSidebarData } from "../model/use-sidebar-data.js";
+import { useDynamicSidebar } from "../model/use-dynamic-sidebar.js";
 import { buildPinnedSidebarState } from "../model/pinned-sidebar-threads.js";
 import { useExpandSidebarThreadPath } from "../list/useSidebarThreadReveal.js";
 import { usePreferencesReady, usePreferencesSync } from "../preferences/PreferencesSync.js";
@@ -18,6 +21,7 @@ import { loadRevealChain, loadRevealTarget } from "./reveal-data.js";
 import "./reveal.css";
 
 const REQUEST_EVENT = "project-first-sidebar:reveal-thread";
+const DYNAMIC_MATCH_REMOVED = Symbol("dynamic-match-removed");
 export function requestThreadReveal(threadId: string): void {
   window.dispatchEvent(new CustomEvent(REQUEST_EVENT, { detail: threadId }));
 }
@@ -35,12 +39,16 @@ export function ThreadReveal() {
   useFilterDocumentSync(windowFilterStore);
   const preferencesReady = usePreferencesReady();
   const data = useSidebarData();
+  const { activeFilterId } = useWindowFilterSnapshot();
+  const dynamicFilterId = isDynamicFilterId(activeFilterId) ? activeFilterId : null;
+  const dynamic = useDynamicSidebar(dynamicFilterId);
   const sdk = useSdk();
   const navigate = useBbNavigate();
   const store = useStore();
   const expandPath = useExpandSidebarThreadPath();
-  const latest = useRef({ data, preferencesReady, expandPath });
-  useLayoutEffect(() => { latest.current = { data, preferencesReady, expandPath }; });
+  const current = { data, preferencesReady, expandPath, dynamic, dynamicFilterId };
+  const latest = useRef(current);
+  useLayoutEffect(() => { latest.current = current; });
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
   const pendingConfirmation = useRef<Confirmation | null>(null);
   const cancelRef = useRef<HTMLButtonElement>(null);
@@ -53,6 +61,12 @@ export function ThreadReveal() {
       clearTimeout(highlightTimer);
       highlighted?.removeAttribute("data-project-first-reveal-highlight");
       highlighted = null;
+    };
+    const highlight = (row: HTMLElement, signal: AbortSignal) => {
+      signal.throwIfAborted();
+      row.setAttribute("data-project-first-reveal-highlight", "");
+      highlighted = row;
+      highlightTimer = setTimeout(clearHighlight, 1800);
     };
     const preferences = () => ({
       organizationMode: store.get(sidebarOrganizationModeAtom),
@@ -78,10 +92,42 @@ export function ThreadReveal() {
       signal.addEventListener("abort", abort, { once: true });
       if (signal.aborted) abort();
     });
-    const perform = async (threadId: string, signal: AbortSignal) => {
+    const perform = async (
+      threadId: string,
+      signal: AbortSignal,
+      initialFilterId: ActiveFilterId,
+      selectFilter: (id: ActiveFilterId) => void,
+    ) => {
       const root = await openRevealSidebar(signal);
+      const startedInDynamicFilter = isDynamicFilterId(initialFilterId);
+      if (startedInDynamicFilter) {
+        const readMatch = (): boolean | null => {
+          const { dynamic, dynamicFilterId } = latest.current;
+          if (dynamicFilterId !== initialFilterId || dynamic.status === "loading") return null;
+          if (dynamic.status === "error") throw new Error("Не удалось загрузить активные треды.");
+          return dynamic.projection?.threadIds.has(threadId) ?? null;
+        };
+        const { matches } = await waitForReveal(() => {
+          const matches = readMatch();
+          return matches === null ? null : { matches };
+        }, signal);
+        if (matches) {
+          const selector = `[data-sidebar-dynamic-filter="${DYNAMIC_FILTERS[initialFilterId].key}"]`;
+          try {
+            const row = await positionRevealThread(root, threadId, signal, () => {
+              const matches = readMatch();
+              if (matches === false) throw DYNAMIC_MATCH_REMOVED;
+              return matches === true && root.querySelector(selector) !== null;
+            });
+            highlight(row, signal);
+            return;
+          } catch (error) {
+            if (error !== DYNAMIC_MATCH_REMOVED) throw error;
+          }
+        }
+      }
       await waitForReveal(() => latest.current.preferencesReady && latest.current.data.status === "ready"
-        && windowFilterStore.getSnapshot().status === "ready", signal);
+        && (startedInDynamicFilter || windowFilterStore.getSnapshot().status === "ready"), signal);
       let chain = await loadChain(threadId, signal);
       const personalId = latest.current.data.personalProject?.id ?? null;
       let plan = planThreadReveal(chain, preferences(), personalId);
@@ -108,7 +154,7 @@ export function ThreadReveal() {
       let row: HTMLElement;
       if (choice === "project") {
         const showPersonalFilter = project.isPersonal && windowFilterStore.isFilterAvailable(PROJECTLESS_FILTER_ID);
-        windowFilterStore.setActiveFilterId(showPersonalFilter ? PROJECTLESS_FILTER_ID : ALL_FILTER_ID);
+        selectFilter(showPersonalFilter ? PROJECTLESS_FILTER_ID : ALL_FILTER_ID);
         if (store.get(sidebarOrganizationModeAtom) !== "project") {
           navigate.toProject(plan.projectId);
           return;
@@ -151,10 +197,11 @@ export function ThreadReveal() {
         const target = await loadRevealTarget(chain, () => latest.current.data, signal);
         signal.throwIfAborted();
         const snapshot = windowFilterStore.getSnapshot();
-        const projection = projectSidebarSnapshot({ activeFilterId: snapshot.activeFilterId, document: snapshot.document,
-          snapshot: { projects: latest.current.data.projects, threads: latest.current.data.threads } });
-        if (!projection.visible.threadIds.has(threadId)) {
-          windowFilterStore.setActiveFilterId(ALL_FILTER_ID);
+        const visibleInCurrentFilter = typeof snapshot.activeFilterId === "string" && projectSidebarSnapshot({
+          activeFilterId: snapshot.activeFilterId, document: snapshot.document, snapshot: latest.current.data,
+        }).visible.threadIds.has(threadId);
+        if (!visibleInCurrentFilter) {
+          selectFilter(ALL_FILTER_ID);
           toast.info("Выбран отбор «Все», чтобы показать тред.");
         }
         latest.current.expandPath({ thread: target,
@@ -164,18 +211,29 @@ export function ThreadReveal() {
         });
         row = await positionRevealThread(root, threadId, signal);
       }
-      row.setAttribute("data-project-first-reveal-highlight", "");
-      highlighted = row;
-      highlightTimer = setTimeout(clearHighlight, 1800);
+      highlight(row, signal);
     };
     const onRequest = (event: Event) => {
       if (!(event instanceof CustomEvent) || typeof event.detail !== "string") return;
       operation?.abort();
       clearHighlight();
-      operation = new AbortController();
-      const signal = operation.signal;
-      void perform(event.detail, signal).catch((error: unknown) => {
+      const controller = new AbortController();
+      operation = controller;
+      const signal = controller.signal;
+      let expectedFilterId = windowFilterStore.getSnapshot().activeFilterId;
+      const unsubscribe = windowFilterStore.subscribe(() => {
+        if (windowFilterStore.getSnapshot().activeFilterId !== expectedFilterId) controller.abort();
+      });
+      const selectFilter = (id: ActiveFilterId) => {
+        signal.throwIfAborted();
+        expectedFilterId = id;
+        windowFilterStore.setActiveFilterId(id);
+      };
+      void perform(event.detail, signal, expectedFilterId, selectFilter).catch((error: unknown) => {
         if (!signal.aborted) toast.error(error instanceof Error ? error.message : "Не удалось показать тред.");
+      }).finally(() => {
+        unsubscribe();
+        if (operation === controller) operation = null;
       });
     };
     window.addEventListener(REQUEST_EVENT, onRequest);

@@ -126,6 +126,9 @@ import { ProjectFilterPanel } from "../filters/ProjectFilterPanel.js";
 import { useWindowFilterSnapshot } from "../filters/use-filter-snapshot.js";
 import { hasProjectModeThreadsSection, projectSidebarSnapshot } from "../model/sidebar-projection.js";
 import { SidebarProjectionKeyProvider } from "../filters/sidebar-projection-context.js";
+import { isDynamicFilterId } from "../filters/dynamic-filter-ids.js";
+import type { FilterDocumentV1 } from "../../shared/filters.js";
+import { DynamicSidebarList } from "./DynamicSidebarList.js";
 
 export interface ProjectListProps {
   activeThreadId: string | null;
@@ -1355,26 +1358,29 @@ function toThreadListStatus(
 function ProjectListComponent({
   activeThreadId,
   onProjectSelect,
-  onManageFilters,
-}: ProjectListProps) {
+  activeFilterId,
+  document,
+}: Omit<ProjectListProps, "onManageFilters"> & {
+  activeFilterId: string;
+  document: FilterDocumentV1 | null;
+}) {
   const sdk = useSdk();
   const navigate = useBbNavigate();
   const sidebarData = useSidebarData();
   const { status, sections, personalProject, archived } = sidebarData;
-  const filterSnapshot = useWindowFilterSnapshot();
   const projection = useMemo(
     () =>
       projectSidebarSnapshot({
-        activeFilterId: filterSnapshot.activeFilterId,
-        document: filterSnapshot.document,
+        activeFilterId,
+        document,
         snapshot: {
           projects: sidebarData.projects,
           threads: sidebarData.threads,
         },
       }),
     [
-      filterSnapshot.activeFilterId,
-      filterSnapshot.document,
+      activeFilterId,
+      document,
       sidebarData.projects,
       sidebarData.threads,
     ],
@@ -1388,8 +1394,8 @@ function ProjectListComponent({
   const projects = sidebarData.projects.filter((project) =>
     visibleProjectIdSet.has(project.id),
   );
-  const activeUserFilter = filterSnapshot.document?.filters.find(
-    (filter) => filter.id === filterSnapshot.activeFilterId,
+  const activeUserFilter = document?.filters.find(
+    (filter) => filter.id === activeFilterId,
   );
   const hasRenderableThreads = threads.some(isSidebarProjectThread);
   const filteredEmptyMessage =
@@ -1794,13 +1800,7 @@ function ProjectListComponent({
   );
 
   if (threadListStatus === "loading" || !preferencesReady) {
-    return (
-      <ProjectListShell
-        header={<ProjectFilterPanel onManageFilters={onManageFilters} />}
-      >
-        <ProjectListNavigationLoadingState />
-      </ProjectListShell>
-    );
+    return <ProjectListNavigationLoadingState />;
   }
 
   return (
@@ -1810,9 +1810,7 @@ function ProjectListComponent({
         isCreatingSection: isCreateThreadSectionPending,
       }}
     >
-      <ProjectListShell
-        header={<ProjectFilterPanel onManageFilters={onManageFilters} />}
-      >
+      <>
         <SidebarDraftPresenceSync />
         <SidebarProjectionKeyProvider value={projection.projectionKey}>
           <ActiveSidebarModeSections
@@ -1953,17 +1951,24 @@ function ProjectListComponent({
             )}
           </>
         )}
-      </ProjectListShell>
+      </>
       {sectionCreateDialog}
       {sectionDeleteDialogContent}
     </SidebarHeaderActionsProvider>
   );
 }
 
-export const ProjectList = memo(function ProjectList(props: ProjectListProps) {
+export const ProjectList = memo(function ProjectList({ onManageFilters, ...props }: ProjectListProps) {
+  const { activeFilterId, document } = useWindowFilterSnapshot();
   return (
     <SidebarRenameProvider>
-      <ProjectListComponent {...props} />
+      <ProjectListShell header={<ProjectFilterPanel onManageFilters={onManageFilters} />}>
+        {isDynamicFilterId(activeFilterId) ? (
+          <DynamicSidebarList {...props} filterId={activeFilterId} />
+        ) : (
+          <ProjectListComponent {...props} activeFilterId={activeFilterId} document={document} />
+        )}
+      </ProjectListShell>
     </SidebarRenameProvider>
   );
 });

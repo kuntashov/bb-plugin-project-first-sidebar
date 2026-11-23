@@ -6,7 +6,8 @@ import {
   useRpc,
 } from "@get-bb/plugin-sdk/app";
 import { PROJECTLESS_FILTER_ID, windowFilterStore } from "../filters/filter-store.js";
-import { sidebarShowProjectlessFilterAtom } from "./atoms.js";
+import { UNREAD_FILTER_ID, WAITING_FOR_ACTION_FILTER_ID } from "../filters/dynamic-filter-ids.js";
+import { sidebarShowProjectlessFilterAtom, sidebarShowUnreadFilterAtom, sidebarShowWaitingForActionFilterAtom } from "./atoms.js";
 import type { projectFirstSidebarRpcContract } from "../../server.js";
 import { PREFERENCES_CHANGED_CHANNEL } from "../../shared/preferences.js";
 import {
@@ -26,6 +27,12 @@ export function usePreferencesReady(): boolean {
 let syncOwnerCount = 0;
 let unsubscribeVisibility: (() => void) | undefined;
 
+const filterVisibilityPreferences = [
+  [PROJECTLESS_FILTER_ID, sidebarShowProjectlessFilterAtom],
+  [UNREAD_FILTER_ID, sidebarShowUnreadFilterAtom],
+  [WAITING_FOR_ACTION_FILTER_ID, sidebarShowWaitingForActionFilterAtom],
+] as const;
+
 export function usePreferencesSync(storeOverride?: ReturnType<typeof useStore>): void {
   const rpc = useRpc<typeof projectFirstSidebarRpcContract>();
   const store = useStore({ store: storeOverride });
@@ -34,17 +41,21 @@ export function usePreferencesSync(storeOverride?: ReturnType<typeof useStore>):
     syncOwnerCount += 1;
     if (syncOwnerCount === 1) {
       attachPreferencesStore(store, pluginId);
-      const updateFilterVisibility = () => {
-        windowFilterStore.setBuiltInFilterVisible(PROJECTLESS_FILTER_ID, store.get(sidebarShowProjectlessFilterAtom));
-      };
+      const stopVisibility = filterVisibilityPreferences.map(([id, preference]) => {
+        const update = () => windowFilterStore.setBuiltInFilterVisible(id, store.get(preference));
+        const unsubscribe = store.sub(preference, update);
+        update();
+        return unsubscribe;
+      });
       const readyAtom = preferencesReadyAtom();
       const updateVisibilityReadiness = () => {
         windowFilterStore.setBuiltInVisibilityReady(store.get(readyAtom));
       };
-      const stopVisibility = store.sub(sidebarShowProjectlessFilterAtom, updateFilterVisibility);
       const stopReadiness = store.sub(readyAtom, updateVisibilityReadiness);
-      unsubscribeVisibility = () => { stopVisibility(); stopReadiness(); };
-      updateFilterVisibility();
+      unsubscribeVisibility = () => {
+        stopVisibility.forEach((unsubscribe) => unsubscribe());
+        stopReadiness();
+      };
       updateVisibilityReadiness();
       hydratePreferencesFromMirror();
       void hydratePreferences(rpc).catch((error: unknown) => {

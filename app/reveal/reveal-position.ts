@@ -38,20 +38,27 @@ export function findThreadRow(root: HTMLElement, id: string): HTMLElement | unde
     .find((row) => row.dataset.sidebarThreadId === id && !row.closest('[inert], [data-sidebar-overflow]'));
 }
 
-export async function positionRevealThread(root: HTMLElement, threadId: string, signal: AbortSignal): Promise<HTMLElement> {
-  const row = await waitForReveal(() => {
+export function positionRevealThread(
+  root: HTMLElement,
+  threadId: string,
+  signal: AbortSignal,
+  canPosition?: () => boolean,
+): Promise<HTMLElement> {
+  return waitForReveal(() => {
+    if (canPosition && !canPosition()) return null;
     const target = findThreadRow(root, threadId);
-    if (target) return target;
+    if (target) {
+      target.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
+      signal.throwIfAborted();
+      target.focus({ preventScroll: true });
+      return target;
+    }
     // Placeholders carry the same navigation entries as keyboard traversal.
     const placeholder = Array.from(root.querySelectorAll<HTMLElement>("[data-sidebar-windowed-nav]"))
       .find((item) => item.dataset.sidebarWindowedNav?.split(" ").some((entry) => entry.split(":")[0] === threadId));
     placeholder?.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
     return null;
   }, signal);
-  signal.throwIfAborted();
-  row.scrollIntoView({ block: "center", inline: "nearest", behavior: "instant" });
-  row.focus({ preventScroll: true });
-  return row;
 }
 
 export function positionRevealProject(

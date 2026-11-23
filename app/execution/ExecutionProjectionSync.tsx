@@ -4,18 +4,39 @@ import { useRealtime, useRealtimeConnectionState, useRpc } from "@get-bb/plugin-
 import type { projectFirstSidebarRpcContract } from "../../server.js";
 import { EXECUTION_CHANGED_CHANNEL, type ExecutionProjection } from "../../shared/execution-projection.js";
 import { useSidebarData } from "../model/use-sidebar-data.js";
+import { useDynamicSidebar } from "../model/use-dynamic-sidebar.js";
+import type { DynamicFilterId } from "../filters/dynamic-filter-ids.js";
 import { sidebarShowExecutionHighlightingAtom } from "../preferences/atoms.js";
 import { createProjectionQueue } from "./projection-queue.js";
 
 export const executionProjectionsAtom = atom<Record<string, ExecutionProjection>>({});
 export const executionIndexErrorAtom = atom(false);
 
-export function ExecutionProjectionSync() {
+const NO_THREAD_IDS: ReadonlySet<string> = new Set();
+
+export function ExecutionProjectionSync({ filterId }: { filterId?: DynamicFilterId }) {
+  return filterId === undefined
+    ? <OrdinaryExecutionProjectionSync />
+    : <DynamicExecutionProjectionSync filterId={filterId} />;
+}
+
+function OrdinaryExecutionProjectionSync() {
+  const { threads } = useSidebarData();
+  const ids = useMemo(() => JSON.stringify(threads.map((thread) => thread.id).sort()), [threads]);
+  return <ExecutionProjectionRequests ids={ids} />;
+}
+
+function DynamicExecutionProjectionSync({ filterId }: { filterId: DynamicFilterId }) {
+  const { projection } = useDynamicSidebar(filterId);
+  const threadIds = projection?.threadIds ?? NO_THREAD_IDS;
+  const ids = useMemo(() => JSON.stringify([...threadIds].sort()), [threadIds]);
+  return <ExecutionProjectionRequests ids={ids} />;
+}
+
+function ExecutionProjectionRequests({ ids }: { ids: string }) {
   const enabled = useAtomValue(sidebarShowExecutionHighlightingAtom);
   const setProjections = useSetAtom(executionProjectionsAtom);
   const setIndexError = useSetAtom(executionIndexErrorAtom);
-  const { threads } = useSidebarData();
-  const ids = useMemo(() => JSON.stringify(threads.map((thread) => thread.id).sort()), [threads]);
   const rpc = useRpc<typeof projectFirstSidebarRpcContract>();
   const queue = useRef<ReturnType<typeof createProjectionQueue> | null>(null);
   const visible = useRef(new Set<string>());

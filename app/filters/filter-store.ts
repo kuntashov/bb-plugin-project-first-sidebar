@@ -1,17 +1,18 @@
 import type { FilterDocumentV1, FilterReadResult } from "../../shared/filters.js";
 import { BUILT_IN_FILTER_IDS } from "../../shared/filters.js";
+import { isDynamicFilterId, type DynamicFilterId } from "./dynamic-filter-ids.js";
 
 export const ALL_FILTER_ID = BUILT_IN_FILTER_IDS[0];
 export const PROJECTLESS_FILTER_ID = BUILT_IN_FILTER_IDS[1];
 
-export type BuiltInFilterId = typeof ALL_FILTER_ID | typeof PROJECTLESS_FILTER_ID;
+export type BuiltInFilterId = typeof ALL_FILTER_ID | typeof PROJECTLESS_FILTER_ID | DynamicFilterId;
 
 export function isBuiltInFilterId(id: ActiveFilterId): id is BuiltInFilterId {
-  return id === ALL_FILTER_ID || id === PROJECTLESS_FILTER_ID;
+  return id === ALL_FILTER_ID || id === PROJECTLESS_FILTER_ID || isDynamicFilterId(id);
 }
 
 // User filter IDs are opaque strings; availability is enforced against the live document.
-export type ActiveFilterId = string;
+export type ActiveFilterId = string | DynamicFilterId;
 
 export interface FilterListRpc {
   call(method: "listFilters", input: null): Promise<FilterReadResult>;
@@ -95,18 +96,19 @@ export function createWindowFilterStore({
 
     const nextDocument = acceptsDocument ? document : snapshot.document;
     if (nextDocument === null) return;
-    const activeWasRemoved =
-      !isBuiltInFilterId(snapshot.activeFilterId)
-      && !nextDocument.filters.some((filter) => filter.id === snapshot.activeFilterId);
+    const { activeFilterId } = snapshot;
+    const activeWasRemoved = typeof activeFilterId === "string"
+      && !isBuiltInFilterId(activeFilterId)
+      && !nextDocument.filters.some((filter) => filter.id === activeFilterId);
     publish({
       ...snapshot,
-      activeFilterId: activeWasRemoved ? ALL_FILTER_ID : snapshot.activeFilterId,
+      activeFilterId: activeWasRemoved ? ALL_FILTER_ID : activeFilterId,
       document: nextDocument,
       status: "ready",
       isRefreshing: isLatestRequest ? false : snapshot.isRefreshing,
       errorMessage: isLatestRequest || acceptsDocument ? null : snapshot.errorMessage,
       removedActiveFilterId: activeWasRemoved
-        ? snapshot.activeFilterId
+        ? activeFilterId
         : snapshot.removedActiveFilterId,
       removalVersion: activeWasRemoved
         ? snapshot.removalVersion + 1

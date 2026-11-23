@@ -14,6 +14,7 @@ import type { OrganizationMode as SidebarOrganizationMode } from "../../shared/p
 import { useSidebarData } from "../model/use-sidebar-data.js";
 import { projectSidebarSnapshot } from "../model/sidebar-projection.js";
 import { useWindowFilterSnapshot } from "../filters/use-filter-snapshot.js";
+import { isDynamicFilterId } from "../filters/dynamic-filter-ids.js";
 import {
   collapsedEnvironmentIdsAtom,
   collapsedProjectIdsAtom,
@@ -101,18 +102,16 @@ export function useSidebarThreadReveal(): void {
     threads: fullThreads,
     personalProject,
   } = useSidebarData();
-  const filterSnapshot = useWindowFilterSnapshot();
+  const { activeFilterId, document } = useWindowFilterSnapshot();
+  const suppressExpansion = isDynamicFilterId(activeFilterId);
   const preferencesReady = usePreferencesReady();
   const projection = useMemo(
-    () =>
-      projectSidebarSnapshot({
-        activeFilterId: filterSnapshot.activeFilterId,
-        document: filterSnapshot.document,
-        snapshot: { projects, threads: fullThreads },
-      }),
+    () => typeof activeFilterId === "string"
+      ? projectSidebarSnapshot({ activeFilterId, document, snapshot: { projects, threads: fullThreads } })
+      : null,
     [
-      filterSnapshot.activeFilterId,
-      filterSnapshot.document,
+      activeFilterId,
+      document,
       fullThreads,
       projects,
     ],
@@ -120,10 +119,11 @@ export function useSidebarThreadReveal(): void {
   useSidebarThreadRevealCore({
     selectedThreadId: routedThreadId ?? undefined,
     fullThreads,
-    visibleThreadIds: projection.visible.threadIds,
+    visibleThreadIds: projection?.visible.threadIds,
     threadsReady: status === "ready",
     preferencesReady,
     personalProjectId: personalProject?.id ?? null,
+    suppressExpansion,
   });
 }
 
@@ -270,10 +270,11 @@ export function resolveThreadRevealExpansion({
 interface SidebarThreadRevealInputs {
   selectedThreadId: string | undefined;
   fullThreads: readonly SidebarThread[];
-  visibleThreadIds: ReadonlySet<string>;
+  visibleThreadIds: ReadonlySet<string> | undefined;
   threadsReady: boolean;
   preferencesReady: boolean;
   personalProjectId: string | null;
+  suppressExpansion: boolean;
 }
 
 function useSidebarThreadRevealCore({
@@ -283,6 +284,7 @@ function useSidebarThreadRevealCore({
   threadsReady,
   preferencesReady,
   personalProjectId,
+  suppressExpansion,
 }: SidebarThreadRevealInputs): void {
   const expandPath = useExpandSidebarThreadPath();
   const threadById = useMemo(
@@ -293,7 +295,7 @@ function useSidebarThreadRevealCore({
     () =>
       new Map(
         fullThreads
-          .filter((thread) => visibleThreadIds.has(thread.id))
+          .filter((thread) => visibleThreadIds?.has(thread.id))
           .map((thread) => [thread.id, thread]),
       ),
     [fullThreads, visibleThreadIds],
@@ -311,8 +313,16 @@ function useSidebarThreadRevealCore({
       threads: fullThreads,
       threadById,
       threadsReady,
-      preferencesReady,
+      preferencesReady: preferencesReady || suppressExpansion,
     });
+    if (suppressExpansion) {
+      revealState.current = {
+        ...step.state,
+        pendingNavigation: undefined,
+        previousUnreadIds: threadsReady ? step.state.previousUnreadIds : null,
+      };
+      return;
+    }
     revealState.current = step.state;
     for (const threadId of step.revealIds) {
       const thread = visibleThreadById.get(threadId);
@@ -336,6 +346,7 @@ function useSidebarThreadRevealCore({
     visibleThreadById,
     effectivePinnedThreadIds,
     expandPath,
+    suppressExpansion,
   ]);
 }
 
