@@ -1,13 +1,13 @@
 import { ExecutionProjectionSync } from "./app/execution/ExecutionProjectionSync.js";
 import { RebuildSettings } from "./app/execution/RebuildSettings.js";
 import { useCallback, useRef, useState, type ComponentType } from "react";
-import { getDefaultStore, Provider as JotaiProvider } from "jotai";
+import { Provider as JotaiProvider } from "jotai";
 import { definePluginApp, type PluginThreadListProps } from "@get-bb/plugin-sdk/app";
 import { CompactViewportOverrideProvider } from "@/components/ui/hooks/use-compact-viewport";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { BuiltInFilterVisibilitySettings } from "./app/preferences/BuiltInFilterVisibilitySettings.js";
 import { ImportPreferences } from "./app/preferences/ImportPreferences.js";
-import { PreferencesSync } from "./app/preferences/PreferencesSync.js";
+import { PreferencesSync, sidebarPreferencesStore } from "./app/preferences/PreferencesSync.js";
 import { ProjectList } from "./app/list/ProjectList.js";
 import { ProjectFilterEditor } from "./app/filters/ProjectFilterEditor.js";
 import { ProjectFilterDialog } from "./app/filters/ProjectFilterDialog.js";
@@ -52,8 +52,6 @@ function ThreadList({
     </CompactViewportOverrideProvider>
   );
 }
-
-const sidebarPreferencesStore = getDefaultStore();
 
 function withSidebarPreferences<Props extends object>(Slot: ComponentType<Props>) {
   return function SidebarPreferencesSlot(props: Props) {

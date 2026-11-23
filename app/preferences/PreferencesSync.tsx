@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { useAtomValue, useStore } from "jotai";
+import { getDefaultStore, useAtomValue, useStore } from "jotai";
 import {
   experimental_usePluginId,
   useRealtime,
@@ -17,6 +17,8 @@ import {
   preferencesReadyAtom,
 } from "./preferences-sync.js";
 
+export const sidebarPreferencesStore = getDefaultStore();
+
 export function usePreferencesReady(): boolean {
   return useAtomValue(preferencesReadyAtom());
 }
@@ -24,9 +26,9 @@ export function usePreferencesReady(): boolean {
 let syncOwnerCount = 0;
 let unsubscribeVisibility: (() => void) | undefined;
 
-export function usePreferencesSync(): void {
+export function usePreferencesSync(storeOverride?: ReturnType<typeof useStore>): void {
   const rpc = useRpc<typeof projectFirstSidebarRpcContract>();
-  const store = useStore();
+  const store = useStore({ store: storeOverride });
   const pluginId = experimental_usePluginId();
   useEffect(() => {
     syncOwnerCount += 1;

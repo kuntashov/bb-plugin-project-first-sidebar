@@ -14,7 +14,7 @@ import {
   sidebarManualSectionOrderAtom,
   sidebarOrganizationModeAtom,
 } from "../preferences/atoms.js";
-import { usePreferencesSync } from "../preferences/PreferencesSync.js";
+import { sidebarPreferencesStore, usePreferencesSync } from "../preferences/PreferencesSync.js";
 
 export interface ThreadSectionMoveDestination {
   label: string;
@@ -28,9 +28,9 @@ function choiceId(sectionId: string | null): string {
 }
 
 function useMoveDestinations(): readonly ThreadSectionMoveDestination[] | null {
-  usePreferencesSync();
-  const mode = useAtomValue(sidebarOrganizationModeAtom);
-  const storedOrder = useAtomValue(sidebarManualSectionOrderAtom);
+  usePreferencesSync(sidebarPreferencesStore);
+  const mode = useAtomValue(sidebarOrganizationModeAtom, { store: sidebarPreferencesStore });
+  const storedOrder = useAtomValue(sidebarManualSectionOrderAtom, { store: sidebarPreferencesStore });
   const { sections } = experimental_useSidebarThreads();
   const destinations =
     mode === "chronological"

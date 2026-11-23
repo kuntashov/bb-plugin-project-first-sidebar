@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
-import { cleanup, waitFor } from "@testing-library/react";
-import { createStore, Provider } from "jotai";
+import { cleanup, screen, waitFor } from "@testing-library/react";
+import { createStore, getDefaultStore, Provider } from "jotai";
 import type { ReactNode } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
@@ -9,16 +9,20 @@ import type {
   PluginBrowserBbSdk,
   PluginThreadAction,
   PluginThreadActionTarget,
+  PluginThreadListProps,
 } from "@get-bb/plugin-sdk/app";
 import {
   installTestPluginRuntime,
+  loadPluginApp,
   renderSlot,
 } from "@get-bb/plugin-sdk/testing/app";
 import { experimental_makePanelController } from "@get-bb/plugin-sdk/testing";
+import { defaultFilterDocument } from "../../shared/filters.js";
 import { makePluginProject, sdkResult } from "../model/fixtures.js";
 import {
   preferenceValueAtom,
   resetPreferencesSyncForTest,
+  setPreferencesMirrorStorageForTest,
 } from "../preferences/preferences-sync.js";
 
 installTestPluginRuntime();
@@ -28,6 +32,7 @@ const { moveThreadAction } = await import("./moveThreadAction.js");
 afterEach(() => {
   cleanup();
   resetPreferencesSyncForTest();
+  setPreferencesMirrorStorageForTest(undefined);
 });
 
 function makeSection(id: string, name: string) {
@@ -126,7 +131,7 @@ function renderMove(
     sdkCalls: slot.inspection.sdkCalls,
     hydrated: () =>
       waitFor(() =>
-        expect(store.get(preferenceValueAtom("organizationMode"))).toBe(
+        expect(getDefaultStore().get(preferenceValueAtom("organizationMode"))).toBe(
           organizationMode,
         ),
       ),
@@ -139,6 +144,49 @@ function run(action: PluginThreadAction | null, value: string) {
 }
 
 describe("Move to section", () => {
+  it.each(["action", "sidebar"] as const)("shares preferences when the %s mounts first", async (first) => {
+    const app = await loadPluginApp(() => import("../../app.js"));
+    const Sidebar = app.threadLists[0]!.component;
+    const props: PluginThreadListProps = {
+      activeThreadId: null, activeProjectId: null, isCompactViewport: false, onNavigate: () => {}, searchQuery: "",
+    };
+    const actionHostStore = createStore();
+    const sidebarHostStore = createStore();
+    const collected: { current: Collected | null } = { current: null };
+    function Component({ showAction, showSidebar }: { showAction: boolean; showSidebar: boolean }) {
+      return <>
+        {showAction ? <Provider store={actionHostStore}><Probe collected={collected} /></Provider> : null}
+        {showSidebar ? <Provider store={sidebarHostStore}><Sidebar {...props} /></Provider> : null}
+      </>;
+    }
+    setPreferencesMirrorStorageForTest(null);
+    const slot = renderSlot({ component: Component }, { showAction: first === "action", showSidebar: first === "sidebar" }, {
+      sidebarThreads: {
+        threads: [],
+        projects: [makePluginProject()],
+        sections: [makeSection("sec_a", "Alpha"), makeSection("sec_b", "Beta")],
+      },
+      rpc: {
+        listFilters: () => ({ status: "success", document: defaultFilterDocument() }),
+        listPreferences: () => ({ preferences: {
+          organizationMode: "chronological",
+          manualSectionOrder: ["pinned", "threads", "section:sec_b", "section:sec_a"],
+        } }),
+      },
+    });
+    const moveChoices = () => collected.current?.item(makeTarget())?.choices?.items.map((item) => item.id);
+    if (first === "action") {
+      await waitFor(() => expect(moveChoices()).toEqual(["threads", "sec_b", "sec_a"]));
+    } else {
+      await screen.findByRole("radio", { name: "Без проектов" });
+    }
+    await slot.lifecycle.rerender(<Component showAction showSidebar />);
+    await screen.findByRole("radio", { name: "Без проектов" });
+    await screen.findByRole("button", { name: "Collapse Beta section" });
+    await waitFor(() => expect(moveChoices()).toEqual(["threads", "sec_b", "sec_a"]));
+    expect(slot.rpcCalls.filter(({ method }) => method === "listPreferences")).toHaveLength(1);
+  });
+
   it("offers the sections in the list's order and marks the current one", async () => {
     const { item, hydrated } = renderMove();
     await hydrated();
