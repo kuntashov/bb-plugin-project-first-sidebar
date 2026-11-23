@@ -2,6 +2,7 @@
 import { act, cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useReducer, useState } from "react";
+import { createStore, Provider as JotaiProvider } from "jotai";
 import { toast } from "sonner";
 import type { PluginSidebarThread, PluginSidebarThreadsState, PluginThreadListProps } from "@get-bb/plugin-sdk/app";
 import { loadPluginApp, renderSlot, type RenderSlotOptions } from "@get-bb/plugin-sdk/testing/app";
@@ -9,6 +10,7 @@ import { defaultFilterDocument, FILTERS_CHANGED_CHANNEL, filterDocumentSchema, t
 import { defaultPreferences, PREFERENCES_CHANGED_CHANNEL, type PreferenceValues } from "../../shared/preferences.js";
 import { EXECUTION_CHANGED_CHANNEL } from "../../shared/execution-projection.js";
 import { createWindowFilterStore, windowFilterStore } from "../filters/filter-store.js";
+import { UNREAD_FILTER_ID, WAITING_FOR_ACTION_FILTER_ID } from "../filters/dynamic-filter-ids.js";
 import { makePluginProject, makeSidebarThread } from "../model/fixtures.js";
 import { flushPreferenceWritesForTest, resetPreferencesSyncForTest, setPreferencesMirrorStorageForTest } from "../preferences/preferences-sync.js";
 import { requestThreadReveal } from "../reveal/ThreadReveal.js";
@@ -18,6 +20,7 @@ const app = await loadPluginApp(() => import("../../app.js"));
 const ThreadList = app.threadLists[0]!.component;
 const RevealOverlay = app.appOverlays.find(({ id }) => id === "thread-reveal")!.component;
 const QuickSearchOverlay = app.appOverlays.find(({ id }) => id === "quick-thread-search")!.component;
+const VisibilitySettings = app.settingsSections.find(({ id }) => id === "built-in-filter-visibility")!.component;
 const projects = [
   makePluginProject({ id: "app", name: "App" }),
   makePluginProject({ id: "web", name: "Web" }),
@@ -36,6 +39,7 @@ const sdkRuntime: Pick<SdkApp, "experimental_useSidebarThreads" | "useBbContext"
 
 beforeEach(() => {
   windowFilterStore.setActiveFilterId("all");
+  windowFilterStore.setBuiltInVisibilityReady(false);
   setPreferencesMirrorStorageForTest(null);
   scrollIntoView.mockReset();
   Element.prototype.scrollIntoView = scrollIntoView;
@@ -101,6 +105,8 @@ interface MountOptions {
   activeStatus?: PluginSidebarThreadsState["status"];
   windowed?: boolean;
   quickSearch?: boolean;
+  settings?: boolean;
+  pendingPreferences?: Promise<void>;
   threadActions?: RenderSlotOptions["threadActions"];
   sdk?: RenderSlotOptions["sdk"];
 }
@@ -113,6 +119,8 @@ async function mount({
   activeStatus = "ready",
   windowed = false,
   quickSearch = false,
+  settings = false,
+  pendingPreferences,
   threadActions,
   sdk,
 }: MountOptions = {}) {
@@ -143,6 +151,9 @@ async function mount({
   let setSidebarVisible = (_visible: boolean) => {};
   let openThread: PluginSidebarThread | undefined;
   const navigateFromLink = vi.fn();
+  const sidebarHostStore = createStore();
+  const overlayHostStore = createStore();
+  const settingsHostStore = createStore();
   const bbContext = sdkRuntime.useBbContext;
   vi.spyOn(sdkRuntime, "useBbContext").mockImplementation(() => ({
     ...bbContext(),
@@ -163,8 +174,10 @@ async function mount({
     };
     return (
       <>
-        <RevealOverlay />
-        {quickSearch && <QuickSearchOverlay />}
+        <JotaiProvider store={overlayHostStore}>
+          <RevealOverlay />
+          {quickSearch && <QuickSearchOverlay />}
+        </JotaiProvider>
         <div data-sidebar={windowed ? "content" : undefined} ref={(element) => {
           if (windowed && element) Object.defineProperty(element, "clientHeight", { configurable: true, value: 500 });
         }} onClick={(event) => {
@@ -177,8 +190,9 @@ async function mount({
           openThread = target;
           rerender();
         }}>
-          {sidebarVisible ? <ThreadList {...props} /> : null}
+          {sidebarVisible && <JotaiProvider store={sidebarHostStore}><ThreadList {...props} /></JotaiProvider>}
         </div>
+        {settings && <JotaiProvider store={settingsHostStore}><VisibilitySettings /></JotaiProvider>}
         <button type="button">{openThread?.displayTitle ?? "Chat"}</button>
       </>
     );
@@ -196,7 +210,10 @@ async function mount({
         if (listFiltersError) throw new Error("listFilters unavailable");
         return { status: "success", document };
       },
-      listPreferences: () => ({ preferences: { ...defaultPreferences(), ...preferences } }),
+      listPreferences: async () => {
+        await pendingPreferences;
+        return { preferences: { ...defaultPreferences(), ...preferences } };
+      },
       setPreference: (input: unknown) => input,
       getExecutionIndexStatus: () => ({ state: "done", total: 1, done: 1, errors: 0 }),
       getExecutionProjections: (input: unknown) => ({
@@ -217,6 +234,7 @@ async function mount({
     const snapshot = windowFilterStore.getSnapshot();
     expect(snapshot.status).toBe(listFiltersError ? "error" : "ready");
     if (!listFiltersError) expect(snapshot.document?.revision).toBe(document.revision);
+    if (!pendingPreferences) expect(snapshot.builtInVisibilityReady).toBe(true);
   });
   return {
     view,
@@ -249,14 +267,23 @@ async function mount({
 describe("dynamic sidebar filters", () => {
   it.each(["Все непрочитанные", "Ждут действия"])("requests active highlights in Only archived and still runs row actions in %s", async (name) => {
     const markRead = vi.fn();
+    const restore = vi.fn();
     const harness = await mount({
       preferences: { threadLifecycles: ["archived"], showExecutionHighlighting: true, rowActions: ["bb--core/read"] },
-      threadActions: (thread) => [{
-        key: "bb--core/read",
-        pluginId: "bb--core",
-        group: "lifecycle",
-        action: { label: "Mark read", icon: "Check", run: async () => { markRead(thread.id); } },
-      }],
+      threadActions: (thread) => [
+        {
+          key: "bb--core/read",
+          pluginId: "bb--core",
+          group: "lifecycle",
+          action: { label: "Mark read", icon: "Check", run: async () => { markRead(thread.id); } },
+        },
+        {
+          key: "bb--core/archive",
+          pluginId: "bb--core",
+          group: "lifecycle",
+          action: { label: "Restore from archive", icon: "Archive", run: async () => { restore(thread.id); } },
+        },
+      ],
     });
     expect(row(archived.id)).not.toBeNull();
     expect(row(active.id)).toBeNull();
@@ -276,6 +303,8 @@ describe("dynamic sidebar filters", () => {
     expect(markRead).toHaveBeenCalledExactlyOnceWith(active.id);
     fireEvent.click(radio("Все"));
     expect(row(archived.id)).not.toBeNull();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Restore from archive" })); });
+    expect(restore).toHaveBeenCalledExactlyOnceWith(archived.id);
     await flushPreferenceWritesForTest();
     expect(harness.getPreferenceWrites()).toEqual([]);
     expect(harness.fetchNextPage).not.toHaveBeenCalled();
@@ -321,6 +350,18 @@ describe("dynamic sidebar filters", () => {
       expect(document.activeElement).toBe(row());
     });
     expect(row()?.hasAttribute("data-project-first-reveal-highlight")).toBe(true);
+    expect(harness.view.inspection.sdkCalls).toEqual([]);
+  });
+
+  it("reports an active snapshot error separately from an empty result and keeps the selected filter", async () => {
+    const onError = vi.spyOn(toast, "error");
+    const harness = await mount({ activeStatus: "error", preferences: { threadLifecycles: ["archived"] } });
+    fireEvent.click(radio("Ждут действия"));
+    expect(screen.getByRole("alert").textContent).toBe("Не удалось загрузить активные треды");
+    expect(screen.queryByText("Нет тредов, ожидающих действия")).toBeNull();
+    await act(async () => requestThreadReveal(active.id));
+    expect(onError).toHaveBeenCalledExactlyOnceWith("Не удалось загрузить активные треды.");
+    expect(radio("Ждут действия").getAttribute("aria-checked")).toBe("true");
     expect(harness.view.inspection.sdkCalls).toEqual([]);
   });
 
@@ -506,6 +547,52 @@ describe("dynamic sidebar filters", () => {
     await harness.view.behavior.emitRealtime(PREFERENCES_CHANGED_CHANNEL, { key: "showProjectlessFilter", value: true });
     expect(radio("Без проектов")).toBeTruthy();
     expect(radio("Ждут действия").getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("keeps the built-ins gated until saved visibility is applied, then shares settings across slot stores", async () => {
+    let finishPreferences!: () => void;
+    const pendingPreferences = new Promise<void>((resolve) => { finishPreferences = resolve; });
+    const harness = await mount({
+      pendingPreferences,
+      settings: true,
+      preferences: { showProjectlessFilter: false, showUnreadFilter: false, showWaitingForActionFilter: false },
+    });
+    const labels = ["Без проектов", "Все непрочитанные", "Ждут действия"];
+    expect(screen.getAllByRole("radio").map((button) => button.textContent)).toEqual(["Все"]);
+    act(() => windowFilterStore.setActiveFilterId(UNREAD_FILTER_ID));
+    expect(windowFilterStore.getSnapshot().activeFilterId).toBe("all");
+    const availableDuringLoad: boolean[][] = [];
+    const stop = windowFilterStore.subscribe(() => {
+      availableDuringLoad.push((["projectless", UNREAD_FILTER_ID, WAITING_FOR_ACTION_FILTER_ID] as const).map((id) =>
+        windowFilterStore.isFilterAvailable(id),
+      ));
+    });
+    try {
+      await act(async () => finishPreferences());
+      await waitFor(() => expect(windowFilterStore.getSnapshot().builtInVisibilityReady).toBe(true));
+    } finally {
+      stop();
+    }
+    expect(availableDuringLoad.length).toBeGreaterThan(0);
+    expect(availableDuringLoad.every((values) => values.every((visible) => !visible))).toBe(true);
+    for (const name of labels) expect(screen.queryByRole("radio", { name })).toBeNull();
+
+    const controls = [
+      ["Без проектов", "showProjectlessFilter"],
+      ["Непрочитанные", "showUnreadFilter"],
+      ["Ждут действия", "showWaitingForActionFilter"],
+    ] as const;
+    for (const [index, [label]] of controls.entries()) {
+      const checkbox = screen.getByRole<HTMLInputElement>("checkbox", { name: `Показывать фильтр «${label}»` });
+      expect(checkbox.checked).toBe(false);
+      expect(checkbox.disabled).toBe(false);
+      fireEvent.click(checkbox);
+      expect(radio(labels[index]!).getAttribute("aria-checked")).toBe("false");
+    }
+    await flushPreferenceWritesForTest();
+    expect(harness.getPreferenceWrites().map(({ input }) => input)).toEqual(
+      controls.map(([, key]) => ({ key, value: true })),
+    );
   });
 
   it("preserves dynamic selection across document updates and leaves dynamic options out of quick search", async () => {

@@ -22,11 +22,15 @@ export function projectDynamicSidebar(
     threads.filter((thread) => !thread.isArchived).map((thread) => [thread.id, thread]),
   );
   const resolveProjectId = createSidebarProjectIdResolver(threadById);
-  const threadsByProjectId = new Map(projects.map((project) => [project.id, [] as SidebarThread[]]));
+  const threadsByProjectId = new Map<string, SidebarThread[]>(
+    projects.map((project) => [project.id, []]),
+  );
   for (const thread of threadById.values()) {
     const projectId = resolveProjectId(thread);
     if (thread.isHidden) continue;
-    const matches = filterId === UNREAD_FILTER_ID ? thread.isUnread : thread.hasPendingInteraction;
+    const matches = filterId === UNREAD_FILTER_ID
+      ? thread.isUnread === true
+      : thread.hasPendingInteraction === true;
     if (matches) threadsByProjectId.get(projectId)?.push(thread);
   }
 

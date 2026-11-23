@@ -5,12 +5,10 @@ import { projectDynamicSidebar } from "./dynamic-sidebar-projection.js";
 
 const ACTIVE_LIFECYCLES = ["active"] as const;
 
-export function useActiveSidebarThreads() {
-  return experimental_useSidebarThreads({ experimental_lifecycles: ACTIVE_LIFECYCLES });
-}
-
 export function useDynamicSidebar(filterId: DynamicFilterId | null) {
-  const { projects, threads, status } = useActiveSidebarThreads();
+  const { projects, threads, status } = experimental_useSidebarThreads({
+    experimental_lifecycles: ACTIVE_LIFECYCLES,
+  });
   const projection = useMemo(
     () => filterId !== null && status === "ready"
       ? projectDynamicSidebar({ projects, threads }, filterId)
