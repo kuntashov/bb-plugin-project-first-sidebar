@@ -22,20 +22,21 @@ export function usePreferencesReady(): boolean {
 }
 
 let syncOwnerCount = 0;
+let unsubscribeVisibility: (() => void) | undefined;
 
 export function usePreferencesSync(): void {
   const rpc = useRpc<typeof projectFirstSidebarRpcContract>();
   const store = useStore();
   const pluginId = experimental_usePluginId();
   useEffect(() => {
-    attachPreferencesStore(store, pluginId);
-    const updateFilterVisibility = () => {
-      windowFilterStore.setBuiltInFilterVisible(PROJECTLESS_FILTER_ID, store.get(sidebarShowProjectlessFilterAtom));
-    };
-    const unsubscribeVisibility = store.sub(sidebarShowProjectlessFilterAtom, updateFilterVisibility);
-    updateFilterVisibility();
     syncOwnerCount += 1;
     if (syncOwnerCount === 1) {
+      attachPreferencesStore(store, pluginId);
+      const updateFilterVisibility = () => {
+        windowFilterStore.setBuiltInFilterVisible(PROJECTLESS_FILTER_ID, store.get(sidebarShowProjectlessFilterAtom));
+      };
+      unsubscribeVisibility = store.sub(sidebarShowProjectlessFilterAtom, updateFilterVisibility);
+      updateFilterVisibility();
       hydratePreferencesFromMirror();
       void hydratePreferences(rpc).catch((error: unknown) => {
         console.warn(
@@ -46,8 +47,11 @@ export function usePreferencesSync(): void {
       });
     }
     return () => {
-      unsubscribeVisibility();
       syncOwnerCount -= 1;
+      if (syncOwnerCount === 0) {
+        unsubscribeVisibility?.();
+        unsubscribeVisibility = undefined;
+      }
     };
   }, [pluginId, rpc, store]);
   useRealtime(PREFERENCES_CHANGED_CHANNEL, applyRemotePreferenceSignal);

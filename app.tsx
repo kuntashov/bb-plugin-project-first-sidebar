@@ -1,6 +1,7 @@
 import { ExecutionProjectionSync } from "./app/execution/ExecutionProjectionSync.js";
 import { RebuildSettings } from "./app/execution/RebuildSettings.js";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useRef, useState, type ComponentType } from "react";
+import { getDefaultStore, Provider as JotaiProvider } from "jotai";
 import { definePluginApp, type PluginThreadListProps } from "@get-bb/plugin-sdk/app";
 import { CompactViewportOverrideProvider } from "@/components/ui/hooks/use-compact-viewport";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -52,10 +53,22 @@ function ThreadList({
   );
 }
 
+const sidebarPreferencesStore = getDefaultStore();
+
+function withSidebarPreferences<Props extends object>(Slot: ComponentType<Props>) {
+  return function SidebarPreferencesSlot(props: Props) {
+    return (
+      <JotaiProvider store={sidebarPreferencesStore}>
+        <Slot {...props} />
+      </JotaiProvider>
+    );
+  };
+}
+
 export default definePluginApp((app) => {
-  app.slots.experimental_appOverlay({ id: "quick-thread-search", component: QuickThreadSearch });
+  app.slots.experimental_appOverlay({ id: "quick-thread-search", component: withSidebarPreferences(QuickThreadSearch) });
   app.commands.register({ id: "quick-thread-search", title: "Найти тред по фильтру", run: requestQuickThreadSearch });
-  app.slots.experimental_appOverlay({ id: "thread-reveal", component: ThreadReveal });
+  app.slots.experimental_appOverlay({ id: "thread-reveal", component: withSidebarPreferences(ThreadReveal) });
   app.commands.register({
     id: "reveal-current-thread",
     title: "Показать текущий тред в дереве",
@@ -84,7 +97,7 @@ export default definePluginApp((app) => {
   app.slots.settingsSection({
     id: "built-in-filter-visibility",
     title: "Встроенные фильтры",
-    component: BuiltInFilterVisibilitySettings,
+    component: withSidebarPreferences(BuiltInFilterVisibilitySettings),
   });
   app.slots.settingsSection({ id: "execution-index", title: "Execution index", component: RebuildSettings });
   app.slots.experimental_threadList({
@@ -92,7 +105,7 @@ export default definePluginApp((app) => {
     title: "Project-first sidebar",
     description:
       "Pinned threads, custom sections, projects, machines, and nested threads.",
-    component: ThreadList,
+    component: withSidebarPreferences(ThreadList),
   });
   app.slots.experimental_threadAction(moveThreadAction);
 });

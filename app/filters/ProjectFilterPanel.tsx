@@ -62,20 +62,10 @@ export function ProjectFilterPanel({
   const radioRefs = useRef(new Map<ActiveFilterId, HTMLButtonElement>());
   const groupRef = useRef<HTMLDivElement>(null);
   const focusedFilterId = useRef<ActiveFilterId | null>(null);
-  const handledRemovalVersion = useRef(snapshot.removalVersion);
-
-  useLayoutEffect(() => {
-    if (snapshot.removalVersion === handledRemovalVersion.current) return;
-    handledRemovalVersion.current = snapshot.removalVersion;
-    if (focusedFilterId.current === snapshot.removedActiveFilterId) {
-      focusedFilterId.current = ALL_FILTER_ID;
-      radioRefs.current.get(ALL_FILTER_ID)?.focus();
-    }
-  }, [snapshot.removalVersion, snapshot.removedActiveFilterId]);
 
   useLayoutEffect(() => {
     const focusedId = focusedFilterId.current;
-    if (focusedId !== null && !options.some((option) => option.id === focusedId)) {
+    if (focusedId !== null && !radioRefs.current.has(focusedId)) {
       radioRefs.current.get(ALL_FILTER_ID)?.focus();
     }
   });

@@ -9,6 +9,7 @@ import {
   within,
 } from "@testing-library/react";
 import { useRef } from "react";
+import { createStore, Provider as JotaiProvider } from "jotai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   type PluginSidebarThreadsState,
@@ -253,13 +254,20 @@ describe("project-first-sidebar plugin", () => {
     const props: PluginThreadListProps = {
       activeThreadId: null, activeProjectId: null, isCompactViewport: false, onNavigate: () => {}, searchQuery: "",
     };
-    function Component() {
-      return <><registration.component {...props} /><settings.component /></>;
+    const sidebarHostStore = createStore();
+    const settingsHostStore = createStore();
+    function Component({ settingsOpen }: { settingsOpen: boolean }) {
+      return <>
+        <JotaiProvider store={sidebarHostStore}><registration.component {...props} /></JotaiProvider>
+        {settingsOpen ? <JotaiProvider store={settingsHostStore}><settings.component /></JotaiProvider> : null}
+      </>;
     }
+    setPreferencesMirrorStorageForTest(null);
     const preferences = defaultPreferences();
+    const listPreferences = vi.fn(() => ({ preferences }));
     const options: RenderSlotOptions = {
       rpc: {
-        listPreferences: () => ({ preferences }),
+        listPreferences,
         listFilters: () => ({ status: "success", document: defaultFilterDocument() }),
         setPreference: (input) => {
           const { key, value } = input as { key: "showProjectlessFilter"; value: boolean };
@@ -268,7 +276,7 @@ describe("project-first-sidebar plugin", () => {
         },
       },
     };
-    const first = renderSlot({ component: Component }, {}, options);
+    const first = renderSlot({ component: Component }, { settingsOpen: true }, options);
     const projectless = await screen.findByRole("radio", { name: "Без проектов" });
     const setting = (name: string) => screen.getByRole<HTMLInputElement>("checkbox", { name });
     const label = "Показывать фильтр «Без проектов»";
@@ -287,9 +295,17 @@ describe("project-first-sidebar plugin", () => {
       { method: "setPreference", input: { key: "showProjectlessFilter", value: false } },
     ]);
     first.unmount();
+    resetPreferencesSyncForTest();
+    listPreferences.mockClear();
 
-    const remounted = renderSlot({ component: Component }, {}, options);
-    await waitFor(() => expect(setting(label).checked).toBe(false));
+    const remounted = renderSlot({ component: Component }, { settingsOpen: false }, options);
+    await waitFor(() => {
+      expect(listPreferences).toHaveBeenCalledOnce();
+      expect(windowFilterStore.isFilterAvailable("projectless")).toBe(false);
+    });
+    await remounted.lifecycle.rerender(<Component settingsOpen />);
+    expect(setting(label).disabled).toBe(false);
+    expect(setting(label).checked).toBe(false);
     expect(screen.queryByRole("radio", { name: "Без проектов" })).toBeNull();
     await remounted.behavior.emitRealtime(PREFERENCES_CHANGED_CHANNEL, { key: "showProjectlessFilter", value: true });
     const restored = await screen.findByRole("radio", { name: "Без проектов" });
