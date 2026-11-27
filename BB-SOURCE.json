@@ -1,0 +1,9 @@
+{
+  "project": "project-first-sidebar",
+  "version": "0.4.0-artbear.1",
+  "upstream": "https://github.com/kuntashov/bb-plugin-project-first-sidebar",
+  "upstreamRevision": "eadb752b274735e3dd5a66890b3e05bc6806c08b",
+  "sourceArchiveSha256": "e8a1fdd514c9e526babc5266c144110e7771479c3fe2e9377757d899c922060d",
+  "patchSha256": "5dae295f6f8066abd02165cf57156ae3435b24d718140c5e5559fde03ab3ee0f",
+  "workspaceThread": "thr_sqqhvmccv5"
+}

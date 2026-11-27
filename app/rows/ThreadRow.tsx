@@ -40,6 +40,7 @@ import {
   experimental_ThreadActionsContextMenu as ThreadActionsContextMenu,
   experimental_ThreadActionsMenu as ThreadActionsMenu,
   experimental_ThreadStatusGlyph as ThreadStatusGlyph,
+  type PluginSidebarThreadIndicator,
   experimental_THREAD_ACTION_GROUPS,
   experimental_useThreadActions,
   experimental_useSidebarThreadSplit,
@@ -329,7 +330,7 @@ export function CollapsedThreadStatusGlyph({
   };
   return (
     <ThreadStatusGlyph
-      indicator={resolveThreadListIndicator(statusProps)}
+      indicator={resolveThreadListIndicator(statusProps) as PluginSidebarThreadIndicator}
       rowStatus={pluginStatus}
     />
   );
@@ -362,7 +363,7 @@ function ThreadTrailingIndicator({
       )}
     >
       <ThreadStatusGlyph
-        indicator={indicatorKind}
+        indicator={indicatorKind as PluginSidebarThreadIndicator}
         rowStatus={rowStatus}
         hideIdleDraftLabel={hideIdleDraftLabel}
       />

@@ -111,6 +111,24 @@ describe("keyboard quick navigation", () => {
     await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(2));
     expect(Number.parseInt(screen.getAllByRole("option")[0].style.height)).toBeLessThanOrEqual(44);
   });
+  it("opens from the sidebar, ranks literal results first and opens the title found with a typo", async () => {
+    const literal = entry({ id: "literal", title: "Публкации", updatedAt: 1 });
+    const { view } = await mount({ sdk: { subscribe: () => () => {}, projects: { list: async () => [project] }, threads: {
+      list: async ({ offset } = {}) => offset ? [] : [current, literal],
+      get: async () => makeThreadResponse(current),
+    } } });
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Выбрать фильтр" }), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Найти тред по фильтру" }));
+    const input = await chooseFilter();
+    fireEvent.change(input, { target: { value: "публкации" } });
+    expect(screen.getByRole("option", { selected: true }).getAttribute("title")).toBe(literal.title);
+    expect(screen.getAllByRole("option").map((option) => option.getAttribute("title"))).toEqual([literal.title, current.title]);
+    fireEvent.change(input, { target: { value: "исс/публкации" } });
+    expect(screen.getByRole("option", { selected: true }).getAttribute("title")).toBe(current.title);
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(view.inspection.navigateCalls).toContainEqual({ method: "toThread", threadId: "current" }));
+  });
   it("filters and highlights effective project separately from title, preserving the chosen filter", async () => {
     const target = entry({ id: "child", projectId: "other", parentThreadId: "parent", title: "Настройка сравнения" });
     const parent = entry({ id: "parent", projectId: "app", title: "Родитель" });

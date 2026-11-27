@@ -143,6 +143,7 @@ export interface ProjectListProps {
   activeThreadId: string | null;
   onProjectSelect?: () => void;
   onManageFilters?: (trigger: HTMLButtonElement) => void;
+  onQuickSearch?: () => void;
 }
 
 interface ProjectListShellProps {
@@ -1501,6 +1502,7 @@ function ProjectListComponent({
   activeThreadId,
   onProjectSelect,
   onManageFilters,
+  onQuickSearch,
 }: ProjectListProps) {
   const sdk = useSdk();
   const navigate = useBbNavigate();
@@ -1951,7 +1953,7 @@ function ProjectListComponent({
   if (threadListStatus === "loading" || !preferencesReady) {
     return (
       <ProjectListShell
-        header={<ProjectFilterPanel onManageFilters={onManageFilters} />}
+        header={<ProjectFilterPanel onManageFilters={onManageFilters} onQuickSearch={onQuickSearch} />}
       >
         <ProjectListNavigationLoadingState />
       </ProjectListShell>
@@ -1966,7 +1968,7 @@ function ProjectListComponent({
       }}
     >
       <ProjectListShell
-        header={<ProjectFilterPanel onManageFilters={onManageFilters} />}
+        header={<ProjectFilterPanel onManageFilters={onManageFilters} onQuickSearch={onQuickSearch} />}
       >
         <SidebarDraftPresenceSync />
         <SidebarProjectionKeyProvider value={projection.projectionKey}>

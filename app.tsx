@@ -43,6 +43,7 @@ function ThreadList({
               activeThreadId={activeThreadId}
               onProjectSelect={onNavigate}
               onManageFilters={openFilterDialog}
+              onQuickSearch={requestQuickThreadSearch}
             />
           </div>
           <ProjectSidebarReveal />
@@ -84,7 +85,7 @@ export default definePluginApp((app) => {
   app.slots.settingsSection({
     id: "project-first-sidebar-filters",
     title: "Фильтры проектов",
-    component: ProjectFilterEditor,
+    component: () => <ProjectFilterEditor />,
   });
   app.slots.experimental_threadList({
     id: "project-first-sidebar",

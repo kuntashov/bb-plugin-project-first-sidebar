@@ -9,7 +9,9 @@ type ThreadStatusShape = Pick<
   "status" | "isUnread" | "parentThreadId"
 >;
 type ThreadRuntimeShape = Pick<PluginSidebarThread, "runtimeStatus">;
-type ThreadActivityStateShape = Pick<PluginSidebarThread, "activity">;
+// BB 0.48 included a goal count in sidebar activity. Newer BB exposes goals separately.
+export type ThreadActivity = PluginSidebarThread["activity"] & { goals?: number };
+type ThreadActivityStateShape = { activity: ThreadActivity };
 
 const RUNNING_RUNTIME_STATUSES: Record<
   PluginSidebarThread["runtimeStatus"],
@@ -59,7 +61,7 @@ function hasActivePlanModeActivity(thread: ThreadActivityStateShape): boolean {
 }
 
 function hasActiveGoalActivity(thread: ThreadActivityStateShape): boolean {
-  return thread.activity.goals > 0;
+  return (thread.activity.goals ?? 0) > 0;
 }
 
 function isBusyThread(
@@ -89,7 +91,8 @@ export interface ThreadListIndicatorState {
   queuedWork: PluginSidebarThread["queuedWork"];
 }
 
-export type ThreadListIndicatorKind = PluginSidebarThreadIndicator;
+// Only hosts with the legacy goal count can produce the legacy glyph value.
+export type ThreadListIndicatorKind = PluginSidebarThreadIndicator | "goal";
 
 const THREAD_LIST_INDICATOR_LABELS: Record<
   Exclude<ThreadListIndicatorKind, "none">,

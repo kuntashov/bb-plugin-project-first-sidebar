@@ -62,6 +62,26 @@ describe("project prefix and keyboard layout", () => {
   });
 });
 
+describe("approximate thread titles", () => {
+  it.each(["публкации", "публликации", "публкиации", "публыкации", "ge,krfwb"])(
+    "finds a title with one typo in %s",
+    (query) => {
+      const result = matchThreadQuery("План публикации", "Admin", `adm:план/${query}`);
+      expect(result?.fuzzyParts).toBe(1);
+      expect(result?.titleRanges[0]).toEqual({ start: 0, end: 4 });
+      expect(result?.titleRanges[1]?.start).toBe(5);
+    },
+  );
+
+  it("keeps the project prefix, literal spaces and shorter terms exact", () => {
+    expect(matchThreadQuery("План публикации", "Admin", "admn:публкации")).toBeNull();
+    expect(matchThreadQuery("План публикации", "Admin", "публкации ")).toBeNull();
+    expect(matchThreadQuery("Сервер", "Admin", "срв")).toBeNull();
+    expect(matchThreadQuery("Сервер", "Admin", "proxy")).toBeNull();
+    expect(matchThreadQuery("План публикации", "Admin", "публикации")?.fuzzyParts).toBeUndefined();
+  });
+});
+
 describe("complete metadata instead of loaded sidebar pages", () => {
   it("continues across short pages, offsets before dedup, until an empty page", async () => {
     const list = vi.fn().mockResolvedValueOnce([entry({ id: "one" })])

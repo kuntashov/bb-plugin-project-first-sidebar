@@ -112,13 +112,17 @@ function requireInput(element: HTMLElement): HTMLInputElement {
 }
 
 describe("project filter editor", () => {
-  it("registers the same editor component in app settings", async () => {
+  it("renders the project filter editor from app settings", async () => {
     const app = await loadPluginApp(() => import("../../app.js"));
     const registration = app.settingsSections.find(
       (section) => section.id === "project-first-sidebar-filters",
     );
-    expect(registration).toMatchObject({ title: "Фильтры проектов" });
-    expect(registration?.component).toBe(ProjectFilterEditor);
+    if (!registration) throw new Error("Project filter settings are missing");
+    expect(registration.title).toBe("Фильтры проектов");
+    const slot = renderTypedSlot(registration, {}, {
+      rpc: { listFilters: () => ({ status: "success", document: defaultFilterDocument() }) },
+    });
+    await slot.findByRole("button", { name: "Создать фильтр" });
   });
 
   it("cancels without writing and creates one definition without changing the active filter", async () => {
