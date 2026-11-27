@@ -10,6 +10,10 @@ Assign a built-in BB icon or a small PNG to a custom filter. Show text, icons, o
 
 Keep pinned and nested threads, section controls, collapse preferences and supported drag-and-drop actions. Filtering changes the displayed projection, not thread membership. Archive matches use the pages already loaded in the sidebar.
 
+## Thread status
+
+Open «Статус треда» to see working and inactive threads within the project filter. With BB Sidebar enabled, both sidebars share snoozed, parked and settled threads. Row actions show their results. Clean previews terminals and ports in the chosen settled threads before asking for confirmation.
+
 ## Requirements
 
 Experimental third-party plugin tested with BB 0.48.1 and Plugin SDK 0.6.104. The filter controls currently use Russian labels. No BPM integration or external service account is required. Import existing Thread-list preferences before switching providers. The npm distribution includes prebuilt artifacts.

@@ -15,6 +15,14 @@ An experimental sidebar replacement for [BB](https://github.com/get-bb/bb): proj
 
 The filter interface currently uses Russian labels. Active selection is local to each window and resets on reload. Definitions, icons and display policy are shared. Filtering uses the loaded sidebar snapshot and manually loaded archive pages; it does not search unloaded archives.
 
+## Статус треда
+
+Раскройте «Статус треда» над деревом и выберите Working, Inactive, Snoozed, Parked или Settled. Счётчики и списки учитывают текущий фильтр проектов. Нажатие на название открывает тред. Нажатие на метку в дереве или пункт «Статус треда» в меню строки открывает действия.
+
+BB определяет Working по ходу выполнения и фоновой работе. Для Inactive используется порог из настроек BB Sidebar. Для Snooze доступны настроенные интервалы и местная дата со временем. Resume, Unsnooze и Unsettle возвращают тред в работу. Когда срок Snooze истекает или тред требует внимания, появляется метка Woke.
+
+Для сохранённых статусов и действий включите BB Sidebar 0.3.7. Обе панели читают одни и те же данные. Clean доступен в Settled для одного треда или списка текущего фильтра. Перед подтверждением он показывает терминалы и порты, а после выполнения — закрытые терминалы, отправленные сигналы, оставшиеся порты, пропуски и ошибки.
+
 ## Requirements
 
 BB **0.48.1 or newer** with a compatible Plugin SDK (`>=0.6.104 <0.7`). The verified baseline is BB 0.48.1 / SDK 0.6.104; newer releases may require compatibility fixes. The plugin uses BB's public experimental Plugin SDK. No BPM plugin or external service account is required.

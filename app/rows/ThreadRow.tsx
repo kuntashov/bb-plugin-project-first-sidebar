@@ -1,3 +1,4 @@
+import { useThreadStatus } from "../thread-status/ThreadStatusPanel.js";
 import { executionProjectionsAtom } from "../execution/ExecutionProjectionSync.js";
 import { executionAppearance } from "../../shared/execution-projection.js";
 import {
@@ -488,6 +489,8 @@ function ThreadRowComponent({
     openThreadInSplit(thread.id);
   }, [openThreadInSplit, thread.id]);
   const rowActionKeys = useAtomValue(threadRowActionsAtom);
+  const lifecycle = useThreadStatus();
+  const status = lifecycle?.statuses.get(thread.id);
   const actionTarget = toThreadActionTarget(thread);
   const quickActions = experimental_useThreadActions(actionTarget, {
     keys: thread.archivedAt !== null ? ARCHIVED_ROW_ACTION_KEYS : rowActionKeys,
@@ -497,7 +500,7 @@ function ThreadRowComponent({
   });
   const customizeRowActions = useCustomizeThreadRowActions();
   const isCompactViewport = useIsCompactViewport();
-  const pendingMenuCustomize = useRef<(() => void) | null>(null);
+  const pendingMenuAction = useRef<(() => void) | null>(null);
   const inlineMenuActions: PluginThreadActionsInlineItem[] =
     customizeRowActions === null
       ? []
@@ -511,11 +514,25 @@ function ThreadRowComponent({
               run: () => {
                 const begin = () => customizeRowActions(thread.id);
                 if (isCompactViewport) begin();
-                else pendingMenuCustomize.current = begin;
+                else pendingMenuAction.current = begin;
               },
             },
           },
         ];
+  if (lifecycle && status) {
+    const showStatus = () => lifecycle.open({ threadId: thread.id });
+    inlineMenuActions.push({
+      key: "project-first-sidebar:thread-status",
+      group: experimental_THREAD_ACTION_GROUPS.settings,
+      action: {
+        label: "Статус треда", icon: "ListTree",
+        run: () => {
+          if (isCompactViewport) showStatus();
+          else pendingMenuAction.current = showStatus;
+        },
+      },
+    });
+  }
   const requestRenameFromMenu = () => {
     rename.startEditingFromMenu();
   };
@@ -649,9 +666,9 @@ function ThreadRowComponent({
     [],
   );
   const handleActionsMenuCloseAutoFocus = (event: Event) => {
-    const begin = pendingMenuCustomize.current;
+    const begin = pendingMenuAction.current;
     if (begin) {
-      pendingMenuCustomize.current = null;
+      pendingMenuAction.current = null;
       event.preventDefault();
       begin();
       return;
@@ -779,6 +796,14 @@ function ThreadRowComponent({
             </span>
           )}
         </span>
+        {status && lifecycle && !isEditing && !isCustomizingActions && (status.label !== "Active" || status.woke) && (
+          <button type="button" className="relative z-10 max-w-20 shrink-0 truncate rounded px-1 text-2xs text-muted-foreground hover:bg-sidebar-accent"
+            aria-label={"Статус треда «" + labelTitle + "»"}
+            title={status.group === "Snoozed" && status.until ? new Date(status.until).toLocaleString() : status.label}
+            onClick={() => lifecycle.open({ threadId: thread.id })}>
+            {status.woke ? "Woke" : status.label}
+          </button>
+        )}
         {crossProjectLabel !== null ? (
           <Tooltip>
             <TooltipTrigger asChild>
