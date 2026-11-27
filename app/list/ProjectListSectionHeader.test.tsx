@@ -62,6 +62,8 @@ function dndState(
     reorderTarget: null,
     pinnedItemIds: [],
     pinnedReorderPending: false,
+    projectSectionPreview: null,
+    projectSectionError: null,
   };
 }
 

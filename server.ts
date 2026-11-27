@@ -1,4 +1,4 @@
-import { createExecutionProjectionStore } from "./execution/projection-store.js";
+import { createExecutionProjectionStore, EXECUTION_STORAGE_MIGRATIONS } from "./execution/projection-store.js";
 import { registerCatalogueFill } from "./execution/catalogue-fill.js";
 export { createExecutionProjectionStore } from "./execution/projection-store.js";
 import { executionProjectionSchema } from "./shared/execution-projection.js";
@@ -29,6 +29,33 @@ import {
   type PinnedMode,
   type ProjectFilterRule,
 } from "./shared/filters.js";
+import {
+  PROJECT_SECTION_ASSIGNMENTS_CHANGED_CHANNEL,
+  PROJECT_SECTION_ASSIGNMENT_PROJECT_KEY,
+  PROJECT_SECTION_ASSIGNMENT_SECTION_KEY,
+  projectSectionAssignmentResultSchema,
+  projectSectionClearAssignmentResultSchema,
+  projectSectionCreateThreadResultSchema,
+  projectSectionMetadataReadResultSchema,
+  projectSectionThreadRequestSchema,
+  type ProjectSectionAssignmentResult,
+  type ProjectSectionClearAssignmentResult,
+  type ProjectSectionCreateThreadResult,
+  type ProjectSectionMetadataReadResult,
+} from "./shared/project-section-assignment.js";
+import {
+  defaultProjectSectionDocument,
+  normalizeProjectSectionName,
+  parseProjectSectionDocument,
+  PROJECT_SECTION_MAX_PER_PROJECT,
+  PROJECT_SECTIONS_CHANGED_CHANNEL,
+  projectSectionMutationResultSchema,
+  projectSectionReadResultSchema,
+  validateProjectSectionDocumentSize,
+  type ProjectSectionDocumentV1,
+  type ProjectSectionMutationResult,
+  type ProjectSectionReadResult,
+} from "./shared/project-sections.js";
 import {
   defaultPreferences,
   describePreference,
@@ -133,6 +160,63 @@ export const projectFirstSidebarRpcContract = defineRpcContract({
     }).strict(),
     output: filterMutationResultSchema,
   },
+  listProjectSections: { input: z.null(), output: projectSectionReadResultSchema },
+  createProjectSection: {
+    input: z.object({
+      expectedRevision: z.number().int().nonnegative().safe(),
+      projectId: z.string().min(1),
+      name: z.string(),
+    }).strict(),
+    output: projectSectionMutationResultSchema,
+  },
+  renameProjectSection: {
+    input: z.object({
+      expectedRevision: z.number().int().nonnegative().safe(),
+      projectId: z.string().min(1),
+      sectionId: z.string().min(1),
+      name: z.string(),
+    }).strict(),
+    output: projectSectionMutationResultSchema,
+  },
+  deleteProjectSection: {
+    input: z.object({
+      expectedRevision: z.number().int().nonnegative().safe(),
+      projectId: z.string().min(1),
+      sectionId: z.string().min(1),
+    }).strict(),
+    output: projectSectionMutationResultSchema,
+  },
+  reorderProjectSections: {
+    input: z.object({
+      expectedRevision: z.number().int().nonnegative().safe(),
+      projectId: z.string().min(1),
+      sectionIds: z.array(z.string().min(1)),
+    }).strict(),
+    output: projectSectionMutationResultSchema,
+  },
+  assignProjectSection: {
+    input: z.object({
+      threadId: z.string().min(1),
+      projectId: z.string().min(1),
+      projectSectionId: z.string().min(1),
+    }).strict(),
+    output: projectSectionAssignmentResultSchema,
+  },
+  clearProjectSectionAssignment: {
+    input: z.object({ threadId: z.string().min(1) }).strict(),
+    output: projectSectionClearAssignmentResultSchema,
+  },
+  readProjectSectionMetadata: {
+    input: z.object({ threadIds: z.array(z.string().min(1)) }).strict(),
+    output: projectSectionMetadataReadResultSchema,
+  },
+  createProjectSectionThread: {
+    input: z.object({
+      projectSectionId: z.string().min(1),
+      request: projectSectionThreadRequestSchema,
+    }).strict(),
+    output: projectSectionCreateThreadResultSchema,
+  },
 });
 
 function kvKey(key: PreferenceKey): string {
@@ -202,6 +286,210 @@ export class PreferenceValidationError extends Error {
 }
 
 type SerializeMutation = <T>(operation: () => Promise<T>) => Promise<T>;
+
+const PROJECT_SECTION_MIGRATIONS = [
+  ...EXECUTION_STORAGE_MIGRATIONS,
+  `CREATE TABLE project_section_document (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    document TEXT NOT NULL
+  )`,
+];
+
+type ProjectSectionChange = (
+  document: ProjectSectionDocumentV1,
+) => ProjectSectionDocumentV1 | ProjectSectionMutationResult;
+
+export function createProjectSectionStore(bb: BbPluginApi) {
+  function storageError(message: string) {
+    return {
+      status: "error" as const,
+      code: "storage" as const,
+      issues: [{ path: [] as Array<string | number>, message }],
+    };
+  }
+
+  function openDatabase() {
+    const db = bb.storage.database();
+    bb.storage.migrate(db, PROJECT_SECTION_MIGRATIONS);
+    return db;
+  }
+
+  openDatabase();
+
+  function interpret(stored: string | undefined): ProjectSectionReadResult {
+    if (stored === undefined) {
+      return { status: "success", document: defaultProjectSectionDocument() };
+    }
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(stored) as unknown;
+    } catch {
+      return {
+        status: "error",
+        code: "document_invalid",
+        issues: [{ path: [], message: "project section document is not valid JSON" }],
+      };
+    }
+    const parsed = parseProjectSectionDocument(parsedJson);
+    if (!parsed.success) {
+      return { status: "error", code: "document_invalid", issues: parsed.issues };
+    }
+    const sized = validateProjectSectionDocumentSize(parsed.value);
+    if (!sized.success) {
+      return { status: "error", code: "document_invalid", issues: sized.issues };
+    }
+    return { status: "success", document: sized.value };
+  }
+
+  function read(): Promise<ProjectSectionReadResult> {
+    try {
+      const db = openDatabase();
+      const row = db.prepare(
+        "SELECT document FROM project_section_document WHERE id = 1",
+      ).get() as { document: string } | undefined;
+      return Promise.resolve(interpret(row?.document));
+    } catch {
+      return Promise.resolve(storageError("project section storage could not be read"));
+    }
+  }
+
+  function validationError(issues: Array<{ path: Array<string | number>; message: string }>): ProjectSectionMutationResult {
+    return { status: "error", code: "validation", issues };
+  }
+
+  function mutate(
+    expectedRevision: number,
+    change: ProjectSectionChange,
+  ): Promise<ProjectSectionMutationResult> {
+    let result: ProjectSectionMutationResult;
+    try {
+      const db = openDatabase();
+      const select = db.prepare(
+        "SELECT document FROM project_section_document WHERE id = 1",
+      );
+      const upsert = db.prepare(
+        `INSERT INTO project_section_document (id, document) VALUES (1, ?)
+         ON CONFLICT(id) DO UPDATE SET document = excluded.document`,
+      );
+      result = db.transaction((): ProjectSectionMutationResult => {
+        const row = select.get() as { document: string } | undefined;
+        const current = interpret(row?.document);
+        if (current.status === "error") return current;
+        if (current.document.revision !== expectedRevision) {
+          return { status: "conflict", currentRevision: current.document.revision };
+        }
+        if (!Number.isSafeInteger(current.document.revision + 1)) {
+          return validationError([{ path: ["revision"], message: "revision cannot increase past the safe integer range" }]);
+        }
+        const changed = change(current.document);
+        if ("status" in changed) return changed;
+        const next = { ...changed, revision: current.document.revision + 1 };
+        const valid = parseProjectSectionDocument(next);
+        if (!valid.success) return { status: "error", code: "validation", issues: valid.issues };
+        const sized = validateProjectSectionDocumentSize(valid.value);
+        if (!sized.success) return { status: "error", code: "too_large", issues: sized.issues };
+        upsert.run(JSON.stringify(sized.value));
+        return { status: "success", document: sized.value };
+      })();
+    } catch {
+      return Promise.resolve(storageError("project section storage could not be written"));
+    }
+    if (result.status === "success") {
+      bb.realtime.publish(PROJECT_SECTIONS_CHANGED_CHANNEL, { revision: result.document.revision });
+    }
+    return Promise.resolve(result);
+  }
+
+  function locate(document: ProjectSectionDocumentV1, projectId: string, sectionId: string): ProjectSectionMutationResult | number {
+    const index = document.sections.findIndex((section) => section.id === sectionId);
+    if (index < 0) {
+      return { status: "error", code: "not_found", issues: [{ path: ["sectionId"], message: "project section was not found" }] };
+    }
+    if (document.sections[index]!.projectId !== projectId) {
+      return { status: "error", code: "ownership", issues: [{ path: ["projectId"], message: "project section belongs to another project" }] };
+    }
+    return index;
+  }
+
+  function duplicateName(document: ProjectSectionDocumentV1, projectId: string, name: string, exceptId?: string) {
+    const key = filterNameKey(name);
+    const duplicate = document.sections.some(
+      (section) => section.projectId === projectId && section.id !== exceptId && filterNameKey(section.name) === key,
+    );
+    return duplicate
+      ? validationError([{ path: ["name"], message: "section names must be unique within a project" }])
+      : null;
+  }
+
+  return {
+    read,
+    create(expectedRevision: number, projectId: string, name: string): Promise<ProjectSectionMutationResult> {
+      return mutate(expectedRevision, (document) => {
+        const normalized = normalizeProjectSectionName(name);
+        if (!normalized.success) return { status: "error", code: "validation", issues: normalized.issues };
+        const duplicate = duplicateName(document, projectId, normalized.value);
+        if (duplicate !== null) return duplicate;
+        const count = document.sections.filter((section) => section.projectId === projectId).length;
+        if (count >= PROJECT_SECTION_MAX_PER_PROJECT) {
+          return validationError([{ path: ["projectId"], message: `a project can have at most ${PROJECT_SECTION_MAX_PER_PROJECT} sections` }]);
+        }
+        const id = randomUUID();
+        const sections = [...document.sections, { id, projectId, name: normalized.value }];
+        const order = document.order.map((entry) => entry.projectId === projectId
+          ? { ...entry, sectionIds: [...entry.sectionIds, id] }
+          : entry);
+        if (!order.some((entry) => entry.projectId === projectId)) {
+          order.push({ projectId, sectionIds: [id] });
+        }
+        return { ...document, sections, order };
+      });
+    },
+    rename(expectedRevision: number, projectId: string, sectionId: string, name: string): Promise<ProjectSectionMutationResult> {
+      return mutate(expectedRevision, (document) => {
+        const located = locate(document, projectId, sectionId);
+        if (typeof located !== "number") return located;
+        const normalized = normalizeProjectSectionName(name);
+        if (!normalized.success) return { status: "error", code: "validation", issues: normalized.issues };
+        const duplicate = duplicateName(document, projectId, normalized.value, sectionId);
+        if (duplicate !== null) return duplicate;
+        const sections = document.sections.slice();
+        sections[located] = { ...sections[located]!, name: normalized.value };
+        return { ...document, sections };
+      });
+    },
+    delete(expectedRevision: number, projectId: string, sectionId: string): Promise<ProjectSectionMutationResult> {
+      return mutate(expectedRevision, (document) => {
+        const located = locate(document, projectId, sectionId);
+        if (typeof located !== "number") return located;
+        const sections = document.sections.filter((section) => section.id !== sectionId);
+        const order = document.order.flatMap((entry) => {
+          if (entry.projectId !== projectId) return [entry];
+          const sectionIds = entry.sectionIds.filter((id) => id !== sectionId);
+          return sectionIds.length === 0 ? [] : [{ ...entry, sectionIds }];
+        });
+        return { ...document, sections, order };
+      });
+    },
+    reorder(expectedRevision: number, projectId: string, sectionIds: readonly string[]): Promise<ProjectSectionMutationResult> {
+      return mutate(expectedRevision, (document) => {
+        const current = document.sections.filter((section) => section.projectId === projectId).map((section) => section.id);
+        const seen = new Set<string>();
+        const foreign = sectionIds.some((id) => {
+          if (seen.has(id)) return true;
+          seen.add(id);
+          return !current.includes(id);
+        });
+        if (current.length === 0 || sectionIds.length === 0 || sectionIds.length !== current.length || foreign || seen.size !== current.length) {
+          return validationError([{ path: ["sectionIds"], message: "order must list every section of the project once" }]);
+        }
+        const order = document.order.map((entry) => entry.projectId === projectId
+          ? { projectId, sectionIds: [...sectionIds] }
+          : entry);
+        return { ...document, order };
+      });
+    },
+  };
+}
 
 export function createFilterStore(bb: BbPluginApi, serialize: SerializeMutation) {
   async function read(): Promise<FilterReadResult> {
@@ -497,6 +785,141 @@ export default async function projectFirstSidebarPlugin(bb: BbPluginApi) {
   }
   let importStatus = await serialize(() => importThreadListPreferences(bb));
   const filters = createFilterStore(bb, serialize);
+  const projectSections = createProjectSectionStore(bb);
+
+  function assignmentStorageError(message: string) {
+    return {
+      status: "error" as const,
+      code: "storage" as const,
+      issues: [{ path: [] as string[], message }],
+    };
+  }
+
+  async function assignProjectSection(input: {
+    threadId: string;
+    projectId: string;
+    projectSectionId: string;
+  }): Promise<ProjectSectionAssignmentResult> {
+    const current = await projectSections.read();
+    if (current.status !== "success") {
+      return assignmentStorageError("project section document could not be read");
+    }
+    const definition = current.document.sections.find((section) => section.id === input.projectSectionId);
+    if (definition === undefined) {
+      return {
+        status: "error",
+        code: "section_unavailable",
+        issues: [{ path: ["projectSectionId"], message: "project section was not found" }],
+      };
+    }
+    if (definition.projectId !== input.projectId) {
+      return {
+        status: "error",
+        code: "ownership",
+        issues: [{ path: ["projectId"], message: "project section belongs to another project" }],
+      };
+    }
+    try {
+      await bb.sdk.threads.updatePluginMetadata({
+        threadId: input.threadId,
+        set: {
+          [PROJECT_SECTION_ASSIGNMENT_PROJECT_KEY]: input.projectId,
+          [PROJECT_SECTION_ASSIGNMENT_SECTION_KEY]: input.projectSectionId,
+        },
+      });
+    } catch {
+      return assignmentStorageError("project section assignment could not be written");
+    }
+    bb.realtime.publish(PROJECT_SECTION_ASSIGNMENTS_CHANGED_CHANNEL, { threadIds: [input.threadId] });
+    return { status: "success" };
+  }
+
+  async function clearProjectSectionAssignment(input: {
+    threadId: string;
+  }): Promise<ProjectSectionClearAssignmentResult> {
+    try {
+      await bb.sdk.threads.updatePluginMetadata({
+        threadId: input.threadId,
+        remove: [PROJECT_SECTION_ASSIGNMENT_PROJECT_KEY, PROJECT_SECTION_ASSIGNMENT_SECTION_KEY],
+      });
+    } catch {
+      return assignmentStorageError("project section assignment could not be cleared");
+    }
+    bb.realtime.publish(PROJECT_SECTION_ASSIGNMENTS_CHANGED_CHANNEL, { threadIds: [input.threadId] });
+    return { status: "success" };
+  }
+
+  function threadCreateError(
+    code: "section_unavailable" | "project_mismatch" | "spawn_failed" | "storage",
+    path: string[],
+    message: string,
+  ): ProjectSectionCreateThreadResult {
+    return { status: "error", code, issues: [{ path, message }] };
+  }
+
+  async function createProjectSectionThread(input: {
+    projectSectionId: string;
+    request: { projectId: string };
+  }): Promise<ProjectSectionCreateThreadResult> {
+    const current = await projectSections.read();
+    if (current.status !== "success") {
+      return threadCreateError("storage", [], "project section document could not be read");
+    }
+    const definition = current.document.sections.find((section) => section.id === input.projectSectionId);
+    if (definition === undefined) {
+      return threadCreateError("section_unavailable", ["projectSectionId"], "project section was not found");
+    }
+    if (definition.projectId !== input.request.projectId) {
+      return threadCreateError("project_mismatch", ["request", "projectId"], "request projectId does not match the project section");
+    }
+    const forwarded = { ...input.request } as Record<string, unknown>;
+    delete forwarded.sectionId;
+    let thread: { id?: string };
+    try {
+      thread = await bb.sdk.threads.spawn({
+        ...forwarded,
+        pluginMetadata: {
+          [PROJECT_SECTION_ASSIGNMENT_PROJECT_KEY]: input.request.projectId,
+          [PROJECT_SECTION_ASSIGNMENT_SECTION_KEY]: input.projectSectionId,
+        },
+      } as unknown as Parameters<BbPluginApi["sdk"]["threads"]["spawn"]>[0]);
+    } catch {
+      return threadCreateError("spawn_failed", [], "thread spawn failed");
+    }
+    if (typeof thread.id !== "string" || thread.id.length === 0) {
+      return threadCreateError("spawn_failed", [], "thread spawn failed");
+    }
+    bb.realtime.publish(PROJECT_SECTION_ASSIGNMENTS_CHANGED_CHANNEL, { threadIds: [thread.id] });
+    return {
+      status: "success",
+      threadId: thread.id,
+      assignment: {
+        projectId: input.request.projectId,
+        projectSectionId: input.projectSectionId,
+      },
+    };
+  }
+
+  async function readProjectSectionMetadata(input: {
+    threadIds: string[];
+  }): Promise<ProjectSectionMetadataReadResult> {
+    const threadIds = [...new Set(input.threadIds)];
+    if (threadIds.length === 0) return { status: "success", threads: [] };
+    try {
+      const listed = await bb.sdk.threads.experimental_listPluginMetadata({ threadIds });
+      const byId = new Map(listed.threads.map((thread) => [thread.threadId, thread.metadata]));
+      return {
+        status: "success",
+        threads: threadIds.map((threadId) => ({
+          threadId,
+          metadata: byId.get(threadId) ?? {},
+        })),
+      };
+    } catch {
+      return assignmentStorageError("project section assignments could not be read");
+    }
+  }
+
   async function importPreferences(): Promise<ImportResult> {
     return serialize(async () => {
       importStatus = await importThreadListPreferences(bb);
@@ -539,6 +962,23 @@ export default async function projectFirstSidebarPlugin(bb: BbPluginApi) {
     setPinnedMode({ expectedRevision, pinnedMode }) {
       return filters.setPinnedMode(expectedRevision, pinnedMode);
     },
+    listProjectSections() { return projectSections.read(); },
+    createProjectSection({ expectedRevision, projectId, name }) {
+      return projectSections.create(expectedRevision, projectId, name);
+    },
+    renameProjectSection({ expectedRevision, projectId, sectionId, name }) {
+      return projectSections.rename(expectedRevision, projectId, sectionId, name);
+    },
+    deleteProjectSection({ expectedRevision, projectId, sectionId }) {
+      return projectSections.delete(expectedRevision, projectId, sectionId);
+    },
+    reorderProjectSections({ expectedRevision, projectId, sectionIds }) {
+      return projectSections.reorder(expectedRevision, projectId, sectionIds);
+    },
+    assignProjectSection,
+    clearProjectSectionAssignment,
+    readProjectSectionMetadata,
+    createProjectSectionThread,
   });
 
   bb.cli.register(

@@ -28,11 +28,23 @@ import { useDialogState } from "@/components/ui/use-dialog-state";
 import { ThreadRowNavigationProvider } from "../rows/threadRowNavigation.js";
 import {
   buildProjectThreadGroups,
+  buildProjectThreadRootNodes,
   getProjectThreadItemDescendants,
   type ProjectThreadNode,
 } from "../model/project-thread-groups.js";
+import {
+  projectSectionAssignmentStore,
+  useProjectSectionAssignmentReads,
+} from "../project-sections/assignment-store.js";
+import { ProjectSectionPlacement } from "../project-sections/ProjectSectionPlacement.js";
+import { useProjectSectionSnapshot } from "../project-sections/ProjectSectionSync.js";
 import { getCollapsedChildActivity } from "../model/thread-activity.js";
 import { useSectionThreadDnd } from "../dnd/useSectionThreadDnd.js";
+import {
+  buildProjectSectionDndItems,
+  layoutVisibleProjectSections,
+  shownProjectSectionId,
+} from "../model/project-section-layout.js";
 import { useNestDropPreview } from "../dnd/useNestDropPreview.js";
 import {
   getErrorCode,
@@ -131,6 +143,7 @@ export interface ProjectListProps {
   activeThreadId: string | null;
   onProjectSelect?: () => void;
   onManageFilters?: (trigger: HTMLButtonElement) => void;
+  onQuickSearch?: () => void;
 }
 
 interface ProjectListShellProps {
@@ -462,6 +475,7 @@ function useGroupedModeThreadDnd({
   order,
   onOrderChange,
   pinned,
+  projectSectionGesture,
   rootItems,
   threads,
 }: {
@@ -472,6 +486,13 @@ function useGroupedModeThreadDnd({
   order: readonly SidebarSectionId[];
   onOrderChange: (order: SidebarSectionId[]) => void;
   pinned: GroupedModePinnedProps;
+  projectSectionGesture?: {
+    orderKey: string;
+    revision: number;
+    shownSectionByThreadId: ReadonlyMap<string, string | null>;
+    storedSectionIdsByProject: ReadonlyMap<string, readonly string[]>;
+    visibleSectionIdsByProject: ReadonlyMap<string, readonly string[]>;
+  };
   rootItems: readonly ProjectThreadItem[];
   threads: readonly SidebarThread[];
 }) {
@@ -497,6 +518,7 @@ function useGroupedModeThreadDnd({
     pinnedRootItems: pinned.reorderPinnedRootItems,
     pinnedRootNodes: pinned.reorderPinnedRootNodes,
     onReorderPinnedThread: pinned.onReorderPinnedThread,
+    projectSectionGesture,
   });
   return useNestDropPreview({
     compareThreads,
@@ -561,6 +583,56 @@ function ProjectModeSections({
   const groupThreadsByEnvironment = useAtomValue(
     sidebarGroupThreadsByEnvironmentAtom,
   );
+  const assignmentSnapshot = useProjectSectionAssignmentReads(
+    threads,
+    personalProjectId,
+    compareThreads,
+  );
+  const sectionSnapshot = useProjectSectionSnapshot();
+  const assignmentReadKey = [...assignmentSnapshot.reads].map(([threadId, read]) => (
+    `${threadId}:${read.status}:${read.assignment?.projectId ?? ""}:${read.assignment?.projectSectionId ?? ""}`
+  )).sort().join("|");
+  const sectionDefinitionKey = sectionSnapshot.status !== "ready" || sectionSnapshot.document === null
+    ? sectionSnapshot.status
+    : sectionSnapshot.document.sections.map((section) => `${section.projectId}:${section.id}`).sort().join("|");
+  useEffect(() => {
+    const document = sectionSnapshot.status === "ready" ? sectionSnapshot.document : null;
+    if (document === null) {
+      projectSectionAssignmentStore.replaceRoots([]);
+      return;
+    }
+    const threadById = new Map(threads.map((thread) => [thread.id, thread]));
+    const resolveProjectId = createSidebarProjectIdResolver(threadById);
+    const knownSectionIds = new Map<string, Set<string>>();
+    for (const section of document.sections) {
+      const known = knownSectionIds.get(section.projectId) ?? new Set<string>();
+      known.add(section.id);
+      knownSectionIds.set(section.projectId, known);
+    }
+    const entries = buildProjectThreadRootNodes(threads, compareThreads, false).flatMap((node) => {
+      const projectId = resolveProjectId(node.thread);
+      if (personalProjectId !== null && projectId === personalProjectId) return [];
+      const read = assignmentSnapshot.reads.get(node.thread.id);
+      if (read === undefined || read.status !== "ready") return [];
+      const assignment = read.assignment;
+      const shownSectionId = assignment !== null
+        && assignment.projectId === projectId
+        && knownSectionIds.get(projectId)?.has(assignment.projectSectionId) === true
+        ? assignment.projectSectionId
+        : null;
+      return [{ threadId: node.thread.id, projectId, shownSectionId }];
+    });
+    projectSectionAssignmentStore.replaceRoots(entries);
+  }, [
+    assignmentReadKey,
+    compareThreads,
+    personalProjectId,
+    sectionDefinitionKey,
+    threads,
+  ]);
+  useEffect(() => () => {
+    projectSectionAssignmentStore.replaceRoots([]);
+  }, []);
   const [collapsedProjectIdList, setCollapsedProjectIdList] = useAtom(
     collapsedProjectIdsAtom,
   );
@@ -645,21 +717,94 @@ function ProjectModeSections({
       ),
     [compareThreads, groupThreadsByEnvironment, personalThreads],
   );
+  const sectionDocument = sectionSnapshot.status === "ready" ? sectionSnapshot.document : null;
+  const projectSectionGesture = useMemo(() => {
+    if (sectionDocument === null) return undefined;
+    const storedSectionIdsByProject = new Map(
+      sectionDocument.order.map((entry) => [entry.projectId, entry.sectionIds]),
+    );
+    const knownByProject = new Map<string, Set<string>>();
+    for (const section of sectionDocument.sections) {
+      const known = knownByProject.get(section.projectId) ?? new Set<string>();
+      known.add(section.id);
+      knownByProject.set(section.projectId, known);
+    }
+    const threadById = new Map(threads.map((thread) => [thread.id, thread]));
+    const resolveProjectId = createSidebarProjectIdResolver(threadById);
+    const shownSectionByThreadId = new Map<string, string | null>();
+    for (const node of buildProjectThreadRootNodes(threads, compareThreads, false)) {
+      const projectId = resolveProjectId(node.thread);
+      if (personalProjectId !== null && projectId === personalProjectId) continue;
+      const read = assignmentSnapshot.reads.get(node.thread.id);
+      if (read?.status !== "ready") continue;
+      shownSectionByThreadId.set(
+        node.thread.id,
+        shownProjectSectionId(projectId, knownByProject.get(projectId) ?? new Set(), read.assignment),
+      );
+    }
+    return {
+      orderKey: JSON.stringify([sectionDocument.revision, sectionDocument.order]),
+      revision: sectionDocument.revision,
+      shownSectionByThreadId,
+      storedSectionIdsByProject,
+      visibleSectionIdsByProject: storedSectionIdsByProject,
+    };
+  }, [
+    assignmentSnapshot.reads,
+    compareThreads,
+    personalProjectId,
+    sectionDocument,
+    threads,
+  ]);
   const projectGroups = useMemo(
     () =>
-      projectRows.map((row) =>
-        buildGroupSectionItem(
+      projectRows.map((row) => {
+        const rowThreads = row.threadListState.status === "ready"
+          ? row.threadListState.threads
+          : EMPTY_THREAD_LIST;
+        const flat = () => buildGroupSectionItem(
           row.project.id,
           buildSidebarEntitySectionId("project", row.project.id),
           row.project.name,
-          row.threadListState.status === "ready"
-            ? row.threadListState.threads
-            : EMPTY_THREAD_LIST,
+          rowThreads,
           compareThreads,
           groupThreadsByEnvironment,
-        ),
-      ),
-    [compareThreads, groupThreadsByEnvironment, projectRows],
+        );
+        if (sectionDocument === null) return flat();
+        const orderedIds = sectionDocument.order.find((entry) => entry.projectId === row.project.id)?.sectionIds ?? [];
+        const sections = orderedIds.flatMap((id) => {
+          const section = sectionDocument.sections.find((item) => item.id === id && item.projectId === row.project.id);
+          return section === undefined ? [] : [{ id: section.id, name: section.name }];
+        });
+        const visible = layoutVisibleProjectSections({
+          assignmentReads: assignmentSnapshot.reads,
+          compareThreads,
+          groupEnvironmentThreads: groupThreadsByEnvironment,
+          projectId: row.project.id,
+          sections,
+          threads: rowThreads,
+        });
+        if (visible.layout === null) return flat();
+        const items = buildProjectSectionDndItems(row.project.id, visible.layout);
+        return {
+          kind: "section" as const,
+          group: {
+            id: row.project.id,
+            key: buildSidebarEntitySectionId("project", row.project.id),
+            name: row.project.name,
+            items,
+            threadCount: getProjectThreadItemDescendants(items).length,
+            activity: getCollapsedChildActivity(rowThreads),
+          },
+        };
+      }),
+    [
+      assignmentSnapshot.reads,
+      compareThreads,
+      groupThreadsByEnvironment,
+      projectRows,
+      sectionDocument,
+    ],
   );
   const projectItemsByProjectId = useMemo(
     () =>
@@ -693,6 +838,7 @@ function ProjectModeSections({
       reorderPinnedThreads,
       onReorderPinnedThread,
     },
+    projectSectionGesture,
     rootItems: groupRootItems,
     threads: nonPinnedThreads,
   });
@@ -762,14 +908,14 @@ function ProjectModeSections({
         threads: getProjectThreadItemDescendants(items),
         onNewThread: () => onCreateProjectThread(row.project.id),
         renderContent: (close: () => void) => (
-          <ProjectThreadTree
+          <ProjectSectionPlacement
             projectId={row.project.id}
-            rootItems={items}
-            threadListState={row.threadListState}
+            threads={row.threadListState.status === "ready" ? row.threadListState.threads : []}
+            threadListStatus={row.threadListState.status}
+            compareThreads={compareThreads}
             selectedThreadId={selectedThreadId}
             collapsedThreadIds={collapsedThreadIds}
             collapsedEnvironmentIds={collapsedEnvironmentIds}
-            compareThreads={compareThreads}
             onProjectSelect={() => {
               close();
               onProjectSelect?.();
@@ -1356,6 +1502,7 @@ function ProjectListComponent({
   activeThreadId,
   onProjectSelect,
   onManageFilters,
+  onQuickSearch,
 }: ProjectListProps) {
   const sdk = useSdk();
   const navigate = useBbNavigate();
@@ -1806,7 +1953,7 @@ function ProjectListComponent({
   if (threadListStatus === "loading" || !preferencesReady) {
     return (
       <ProjectListShell
-        header={<ProjectFilterPanel onManageFilters={onManageFilters} />}
+        header={<ProjectFilterPanel onManageFilters={onManageFilters} onQuickSearch={onQuickSearch} />}
       >
         <ProjectListNavigationLoadingState />
       </ProjectListShell>
@@ -1821,7 +1968,7 @@ function ProjectListComponent({
       }}
     >
       <ProjectListShell
-        header={<ProjectFilterPanel onManageFilters={onManageFilters} />}
+        header={<ProjectFilterPanel onManageFilters={onManageFilters} onQuickSearch={onQuickSearch} />}
       >
         <SidebarDraftPresenceSync />
         <SidebarProjectionKeyProvider value={projection.projectionKey}>

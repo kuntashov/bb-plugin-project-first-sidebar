@@ -86,6 +86,8 @@ function makeSectionDnd(
     onClickCapture: () => undefined,
     pinnedItemIds: [],
     pinnedReorderPending: false,
+    projectSectionError: null,
+    projectSectionPreview: null,
     reorderTarget: null,
     ...overrides,
   };

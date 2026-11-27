@@ -5,8 +5,7 @@ import { windowFilterStore } from "../filters/filter-store.js";
 import { useSidebarData } from "../model/use-sidebar-data.js";
 import { usePreferencesReady } from "../preferences/PreferencesSync.js";
 import { sidebarHiddenGroupsAtom, sidebarOrganizationModeAtom, sidebarThreadLifecyclesAtom } from "../preferences/atoms.js";
-import { useExpandSidebarThreadPath } from "../list/useSidebarThreadReveal.js";
-import { buildPinnedSidebarState } from "../model/pinned-sidebar-threads.js";
+import { projectSectionRevealPlacement, useExpandSidebarThreadPath } from "../list/useSidebarThreadReveal.js";
 import { projectSidebarSnapshot } from "../model/sidebar-projection.js";
 import { loadRevealTarget } from "../reveal/reveal-data.js";
 import { planThreadReveal, type RevealThread } from "../reveal/reveal-plan.js";
@@ -82,30 +81,51 @@ export function useSearchNavigation() {
       isHidden: false, environment: { id: thread.environmentId }, host: null,
     }));
     // Hidden ancestors are placement metadata, not rows that must become visible.
-    const loadedTarget = await loadRevealTarget(revealChain, () => latest.current.data, signal);
-    const current = latest.current.data;
-    const threadById = new Map(current.threads.filter((thread) => !thread.isHidden).map((thread) => [thread.id, thread]));
-    const projection = projectSidebarSnapshot({ activeFilterId: selection.filterId, document: snapshot.document,
-      snapshot: { projects: current.projects, threads: current.threads } });
-    if (!projection.visible.threadIds.has(target.id)) throw new Error("Тред открыт, но его текущий путь не попадает в выбранный фильтр сайдбара.");
-    const visiblePath: RevealThread[] = [loadedTarget];
-    let ancestorId = loadedTarget.parentThreadId;
-    const seen = new Set([loadedTarget.id]);
-    while (ancestorId && threadById.has(ancestorId) && !seen.has(ancestorId)) {
-      seen.add(ancestorId);
-      const ancestor = threadById.get(ancestorId)!;
-      visiblePath.push(ancestor); ancestorId = ancestor.parentThreadId;
-    }
-    const sidebarProjectId = chain.at(-1)!.projectId;
-    const placementChain = visiblePath.map((thread, index) => index === visiblePath.length - 1 ? { ...thread, projectId: sidebarProjectId } : thread);
-    // Effective placement comes from the full accessible chain, including a
-    // hidden parent that need not have a row in the tree.
-    const plan = planThreadReveal(placementChain, { organizationMode: store.get(sidebarOrganizationModeAtom),
-      threadLifecycles: store.get(sidebarThreadLifecyclesAtom), hiddenGroups: store.get(sidebarHiddenGroupsAtom) }, current.personalProject?.id ?? null);
-    if (plan.hiddenGroupId) store.set(sidebarHiddenGroupsAtom, (ids) => ids.filter((id) => id !== plan.hiddenGroupId));
-    latest.current.expandPath({ thread: loadedTarget, threadById, sidebarProjectId,
-      effectivePinnedThreadIds: buildPinnedSidebarState({ threads: current.threads }).effectivePinnedThreadIds,
-      personalProjectId: current.personalProject?.id ?? null });
+    await loadRevealTarget(revealChain, () => latest.current.data, signal);
+    const currentPlacement = () => {
+      const current = latest.current.data;
+      const filters = windowFilterStore.getSnapshot();
+      if (filters.activeFilterId !== selection.filterId) throw new Error("Отбор сайдбара изменился. Повторите выбор.");
+      if (current.status !== "ready" || filters.status !== "ready" || filters.isRefreshing || !filters.document) return null;
+      const thread = current.threads.find((item) => item.id === target.id && !item.isHidden);
+      if (!thread) return null;
+      const projection = projectSidebarSnapshot({ activeFilterId: selection.filterId, document: filters.document,
+        snapshot: { projects: current.projects, threads: current.threads } });
+      const sidebarProjectId = projection.full.effectiveProjectIdByThreadId.get(thread.id)!;
+      const projectIds = filterProjectIds(selection.filterId, filters.document, current.projects);
+      if (!projection.visible.threadIds.has(thread.id) || !projectIds.has(sidebarProjectId)) {
+        throw new Error("Тред открыт, но его текущий путь не попадает в выбранный фильтр сайдбара.");
+      }
+      const threadById = new Map(current.threads.filter((item) => !item.isHidden).map((item) => [item.id, item]));
+      const visiblePath: RevealThread[] = [thread];
+      let ancestorId = thread.parentThreadId;
+      const seen = new Set([thread.id]);
+      while (ancestorId && threadById.has(ancestorId) && !seen.has(ancestorId)) {
+        seen.add(ancestorId);
+        const ancestor = threadById.get(ancestorId)!;
+        visiblePath.push(ancestor); ancestorId = ancestor.parentThreadId;
+      }
+      const placementChain = visiblePath.map((item, index) => index === visiblePath.length - 1 ? { ...item, projectId: sidebarProjectId } : item);
+      const plan = planThreadReveal(placementChain, { organizationMode: store.get(sidebarOrganizationModeAtom),
+        threadLifecycles: store.get(sidebarThreadLifecyclesAtom), hiddenGroups: store.get(sidebarHiddenGroupsAtom) }, current.personalProject?.id ?? null);
+      if (plan.hiddenGroupId) store.set(sidebarHiddenGroupsAtom, (ids) => ids.filter((id) => id !== plan.hiddenGroupId));
+      const pinnedIds = projection.full.effectivePinnedThreadIds;
+      const value = document.querySelector("[data-project-section-status]")?.getAttribute("data-project-section-status");
+      const sectionStatus = value === "ready" || value === "error" ? value : "loading";
+      const placement = projectSectionRevealPlacement({ thread, threadById, sidebarProjectId,
+        organizationMode: store.get(sidebarOrganizationModeAtom), personalProjectId: current.personalProject?.id ?? null,
+        pinned: pinnedIds.has(thread.id), sectionStatus });
+      return { thread, threadById, sidebarProjectId, pinnedIds, personalProjectId: current.personalProject?.id ?? null, pending: placement.pending };
+    };
+    await waitForReveal(() => {
+      const placement = currentPlacement();
+      return placement && !placement.pending;
+    }, signal);
+    // Metadata reads may span multiple sidebar updates; expand the latest path.
+    const placement = currentPlacement();
+    if (!placement || placement.pending) throw new Error("Путь треда обновился. Повторите выбор.");
+    latest.current.expandPath({ thread: placement.thread, threadById: placement.threadById, sidebarProjectId: placement.sidebarProjectId,
+      effectivePinnedThreadIds: placement.pinnedIds, personalProjectId: placement.personalProjectId });
     await positionRevealThread(root, target.id, signal);
   };
   return { prepare, commit };

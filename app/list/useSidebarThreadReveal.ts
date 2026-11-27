@@ -8,6 +8,9 @@ import {
   resolveSidebarProjectId,
 } from "../model/project-thread-groups.js";
 import { sectionKeyForThreadSection } from "../model/section-keys.js";
+import { projectSectionCollapseKey } from "../../shared/project-sections.js";
+import { projectSectionAssignmentStore, useAssignmentSnapshot } from "../project-sections/assignment-store.js";
+import { useProjectSectionSnapshot } from "../project-sections/ProjectSectionSync.js";
 import type { CollapsibleSidebarSectionId } from "../model/sidebar-section-id.js";
 import { useBbContext } from "@get-bb/plugin-sdk/app";
 import type { OrganizationMode as SidebarOrganizationMode } from "../../shared/preferences.js";
@@ -93,7 +96,61 @@ export function getThreadSidebarExpansion({
   return { projectId: sidebarProjectId };
 }
 
+function visibleRevealRoot(
+  thread: SidebarThread,
+  threadById: ReadonlyMap<string, SidebarThread>,
+): SidebarThread {
+  let current = thread;
+  const seen = new Set<string>();
+  while (current.parentThreadId !== null && !seen.has(current.id)) {
+    const parent = threadById.get(current.parentThreadId);
+    if (!parent) break;
+    seen.add(current.id);
+    current = parent;
+  }
+  return current;
+}
+
+export function projectSectionRevealPlacement({
+  thread,
+  threadById,
+  organizationMode,
+  personalProjectId,
+  pinned,
+  sectionStatus,
+  sidebarProjectId,
+}: {
+  thread: SidebarThread;
+  threadById: ReadonlyMap<string, SidebarThread>;
+  organizationMode: SidebarOrganizationMode;
+  personalProjectId: string | null;
+  pinned: boolean;
+  sectionStatus: "loading" | "ready" | "error";
+  sidebarProjectId?: string;
+}): { pending: boolean; collapseKey: string | null } {
+  if (organizationMode !== "project" || pinned) return { pending: false, collapseKey: null };
+  const root = visibleRevealRoot(thread, threadById);
+  const projectId = sidebarProjectId ?? resolveSidebarProjectId(root, threadById);
+  if (personalProjectId !== null && projectId === personalProjectId) {
+    return { pending: false, collapseKey: null };
+  }
+  if (sectionStatus !== "ready") return { pending: sectionStatus !== "error", collapseKey: null };
+  const snapshot = projectSectionAssignmentStore.getSnapshot();
+  const read = snapshot.reads.get(root.id);
+  if (read?.status === "error") return { pending: false, collapseKey: null };
+  const placed = snapshot.roots.get(root.id);
+  if (read?.status !== "ready" || placed === undefined) return { pending: true, collapseKey: null };
+  return {
+    pending: false,
+    collapseKey: placed.shownSectionId === null
+      ? null
+      : projectSectionCollapseKey(placed.projectId, placed.shownSectionId),
+  };
+}
+
 export function useSidebarThreadReveal(): void {
+  const sectionSnapshot = useProjectSectionSnapshot();
+  const assignments = useAssignmentSnapshot();
   const { threadId: routedThreadId } = useBbContext();
   const {
     status,
@@ -124,6 +181,8 @@ export function useSidebarThreadReveal(): void {
     threadsReady: status === "ready",
     preferencesReady,
     personalProjectId: personalProject?.id ?? null,
+    sectionStatus: sectionSnapshot.status,
+    assignmentEpoch: assignments.epoch,
   });
 }
 
@@ -274,6 +333,8 @@ interface SidebarThreadRevealInputs {
   threadsReady: boolean;
   preferencesReady: boolean;
   personalProjectId: string | null;
+  sectionStatus: "loading" | "ready" | "error";
+  assignmentEpoch: number;
 }
 
 function useSidebarThreadRevealCore({
@@ -283,7 +344,10 @@ function useSidebarThreadRevealCore({
   threadsReady,
   preferencesReady,
   personalProjectId,
+  sectionStatus,
+  assignmentEpoch,
 }: SidebarThreadRevealInputs): void {
+  const store = useStore();
   const expandPath = useExpandSidebarThreadPath();
   const threadById = useMemo(
     () => new Map(fullThreads.map((thread) => [thread.id, thread])),
@@ -313,6 +377,20 @@ function useSidebarThreadRevealCore({
       threadsReady,
       preferencesReady,
     });
+    const organizationMode = store.get(sidebarOrganizationModeAtom);
+    const placementPending = [...step.revealIds].some((threadId) => {
+      const thread = visibleThreadById.get(threadId);
+      if (!thread || thread.isHidden) return false;
+      return projectSectionRevealPlacement({
+        thread,
+        threadById: visibleThreadById,
+        organizationMode,
+        personalProjectId,
+        pinned: effectivePinnedThreadIds.has(thread.id),
+        sectionStatus,
+      }).pending;
+    });
+    if (placementPending) return;
     revealState.current = step.state;
     for (const threadId of step.revealIds) {
       const thread = visibleThreadById.get(threadId);
@@ -336,6 +414,9 @@ function useSidebarThreadRevealCore({
     visibleThreadById,
     effectivePinnedThreadIds,
     expandPath,
+    store,
+    sectionStatus,
+    assignmentEpoch,
   ]);
 }
 
@@ -367,15 +448,26 @@ export function useExpandSidebarThreadPath() {
       hiddenGroups: store.get(sidebarHiddenGroupsAtom),
     }, args.personalProjectId);
     if (plan.reasons.length) return;
+    const placement = projectSectionRevealPlacement({
+      thread: args.thread,
+      threadById: args.threadById,
+      organizationMode,
+      personalProjectId: args.personalProjectId,
+      pinned: args.effectivePinnedThreadIds.has(args.thread.id),
+      sectionStatus: "ready",
+      sidebarProjectId: args.sidebarProjectId,
+    });
     expandThreadAncestors(threadIdsToExpand, fromNavigation);
     setCollapsedEnvironmentIdList((ids) => removeCollapsedIds(ids, environmentIdsToExpand));
     if (expansion.machineKey) {
       const key = expansion.machineKey;
       setCollapsedMachineKeyList((ids) => removeCollapsedIds(ids, new Set([key])));
     }
-    if (expansion.sectionKey) {
-      const key = expansion.sectionKey;
-      setCollapsedSectionList((ids) => removeCollapsedIds(ids, new Set([key])));
+    const sectionKeys = new Set<string>();
+    if (expansion.sectionKey) sectionKeys.add(expansion.sectionKey);
+    if (!placement.pending && placement.collapseKey) sectionKeys.add(placement.collapseKey);
+    if (sectionKeys.size > 0) {
+      setCollapsedSectionList((ids) => removeCollapsedIds(ids, sectionKeys));
     }
     if (expansion.projectId) {
       const key = expansion.projectId;

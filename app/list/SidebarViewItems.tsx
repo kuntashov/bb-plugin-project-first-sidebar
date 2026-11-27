@@ -47,6 +47,7 @@ export function SidebarHeaderMenuContents({
   compact,
   page,
   onPageChange,
+  showNewSection = true,
   children,
 }: {
   creation: HeaderCreationActions;
@@ -54,6 +55,7 @@ export function SidebarHeaderMenuContents({
   compact: boolean;
   page: SidebarViewPage | null;
   onPageChange: (page: SidebarViewPage | null) => void;
+  showNewSection?: boolean;
   children?: ReactNode;
 }) {
   if (compact && page) {
@@ -75,14 +77,18 @@ export function SidebarHeaderMenuContents({
   }
   return (
     <>
-      <DropdownMenuItem
-        disabled={!creation.onNewSection || creation.isCreatingSection}
-        onSelect={() => creation.onNewSection?.(anchorSectionId)}
-      >
-        <Icon name="SectionAdd" />
-        New section
-      </DropdownMenuItem>
-      <DropdownMenuSeparator />
+      {showNewSection ? (
+        <>
+          <DropdownMenuItem
+            disabled={!creation.onNewSection || creation.isCreatingSection}
+            onSelect={() => creation.onNewSection?.(anchorSectionId)}
+          >
+            <Icon name="SectionAdd" />
+            New section
+          </DropdownMenuItem>
+          <DropdownMenuSeparator />
+        </>
+      ) : null}
       {(
         [
           { page: "organize", label: "Organize", icon: "Layers" },

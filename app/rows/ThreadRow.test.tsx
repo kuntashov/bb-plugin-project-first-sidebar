@@ -30,7 +30,7 @@ import {
   type RenderedSlot,
   type TestThreadActionsResolver,
 } from "@get-bb/plugin-sdk/testing/app";
-import { NO_COLLAPSED_CHILD_ACTIVITY } from "../model/thread-activity.js";
+import { NO_COLLAPSED_CHILD_ACTIVITY, type ThreadActivity } from "../model/thread-activity.js";
 import {
   makeSidebarEnvironment,
   makeSidebarThread,
@@ -67,9 +67,7 @@ function createThread(
   return makeSidebarThread(overrides);
 }
 
-function activity(
-  overrides: Partial<PluginSidebarThread["activity"]>,
-): PluginSidebarThread["activity"] {
+function activity(overrides: Partial<ThreadActivity>): ThreadActivity {
   return {
     workflows: 0,
     backgroundAgents: 0,

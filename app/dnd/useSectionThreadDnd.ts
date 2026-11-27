@@ -21,7 +21,18 @@ import {
 } from "@dnd-kit/core";
 import type { SidebarThread } from "../model/sidebar-thread.js";
 import { useSidebarProjectionKey } from "../filters/sidebar-projection-context.js";
-import { useSdk } from "@get-bb/plugin-sdk/app";
+import { useRpc, useSdk } from "@get-bb/plugin-sdk/app";
+import type { projectFirstSidebarRpcContract } from "../../server.js";
+import { parseProjectSectionDropKey } from "../../shared/project-sections.js";
+import { projectSectionAssignmentStore } from "../project-sections/assignment-store.js";
+import { useProjectSectionStore } from "../project-sections/ProjectSectionSync.js";
+import {
+  assembleProjectSectionReorder,
+  projectIdFromSectionParent,
+  resolveProjectSectionAssignment,
+  sameProjectSectionHeader,
+  type ProjectSectionAssignmentDecision,
+} from "./projectSectionDrag.js";
 import type { NeighborReorderRequest } from "../model/neighbor-reorder.js";
 import {
   getSidebarDndItemId,
@@ -84,6 +95,16 @@ export interface SectionThreadReorderTarget {
   placement: SidebarReorderPlacement;
 }
 
+export interface ProjectSectionDragPreview {
+  assignments: ReadonlyMap<string, string | null>;
+  order: { projectId: string; sectionIds: readonly string[] } | null;
+}
+
+export interface ProjectSectionDragError {
+  projectId: string;
+  message: string;
+}
+
 export interface SectionThreadDndState {
   activeItemId: string | null;
   activeThread: SidebarThread | null;
@@ -98,6 +119,8 @@ export interface SectionThreadDndState {
   reorderTarget: SectionThreadReorderTarget | null;
   pinnedItemIds: readonly string[];
   pinnedReorderPending: boolean;
+  projectSectionPreview: ProjectSectionDragPreview | null;
+  projectSectionError: ProjectSectionDragError | null;
 }
 
 interface UseSectionThreadDndArgs {
@@ -118,6 +141,13 @@ interface UseSectionThreadDndArgs {
     request: NeighborReorderRequest,
     callbacks: { onSettled: () => void },
   ) => void;
+  projectSectionGesture?: {
+    orderKey: string;
+    revision: number;
+    shownSectionByThreadId: ReadonlyMap<string, string | null>;
+    storedSectionIdsByProject: ReadonlyMap<string, readonly string[]>;
+    visibleSectionIdsByProject: ReadonlyMap<string, readonly string[]>;
+  };
 }
 
 interface SectionThreadDndLookup {
@@ -161,6 +191,8 @@ export type SectionThreadDropDecision =
       overThreadId: string;
       reason: "own-subtree" | "already-child";
     }
+  | { kind: "rejected-project-section"; activeId: string; reason: "other-project" | "descendant" }
+  | ProjectSectionAssignmentDecision
   | { kind: "unchanged"; activeId: string; toParentKey: string };
 
 interface ThreadRowPointerInfo {
@@ -520,6 +552,7 @@ function resolveSectionThreadDropParentKey(
 
 interface ResolveSectionThreadDropDecisionOptions {
   groups?: boolean;
+  shownSectionByThreadId?: ReadonlyMap<string, string | null>;
 }
 
 function getPinnedThreadIds(threads: readonly SidebarThread[]): string[] {
@@ -645,6 +678,19 @@ export function resolveSectionThreadDropDecision(
   const toParentKey =
     directParentKey ?? (isSelfCollision ? projectedParentKey : null);
   if (!toParentKey) return null;
+  const projectSectionTarget = parseProjectSectionDropKey(toParentKey);
+  if (projectSectionTarget && threads.every((thread) => thread.pinnedAt === null)) {
+    const projectSectionDecision = resolveProjectSectionAssignment({
+      activeId,
+      fromParentKey,
+      nestedThreadIds: lookup.nestParentIdByItemId,
+      shownSectionByThreadId: options.shownSectionByThreadId ?? new Map(),
+      target: projectSectionTarget,
+      threads,
+      toParentKey,
+    });
+    if (projectSectionDecision) return projectSectionDecision;
+  }
   const projectId = lookup.projectIdByParentKey.get(toParentKey);
   if (
     projectId !== undefined &&
@@ -807,6 +853,7 @@ function resolveTargetParentKey(
     case "pin":
       return PINNED_THREAD_PARENT_KEY;
     case "move":
+    case "assign-project-section":
       return decision.toParentKey;
     default:
       return null;
@@ -883,8 +930,11 @@ function hasDropDecisionLanded(
         (threadId) =>
           lookup.nestParentIdByItemId.get(threadId) === decision.parentThreadId,
       );
+    case "assign-project-section":
+      return false;
     case "reorder-pinned":
     case "rejected":
+    case "rejected-project-section":
     case "unchanged":
       return true;
   }
@@ -905,6 +955,7 @@ export function useSectionThreadDnd({
   pinnedRootItems,
   pinnedRootNodes,
   onReorderPinnedThread,
+  projectSectionGesture,
 }: UseSectionThreadDndArgs): SectionThreadDndState | null {
   const contextProjectionKey = useSidebarProjectionKey();
   const projectionKey = explicitProjectionKey ?? contextProjectionKey;
@@ -927,7 +978,13 @@ export function useSectionThreadDnd({
       rootItems,
     ],
   );
-  const decisionOptions = useMemo(() => ({ groups }), [groups]);
+  const decisionOptions = useMemo(
+    () => ({
+      groups,
+      shownSectionByThreadId: projectSectionGesture?.shownSectionByThreadId,
+    }),
+    [groups, projectSectionGesture?.shownSectionByThreadId],
+  );
   const topLevelSectionIds = useMemo(
     () => new Set<string>(topLevelSectionOrder),
     [topLevelSectionOrder],
@@ -936,12 +993,13 @@ export function useSectionThreadDnd({
     () =>
       JSON.stringify([
         projectionKey,
+        projectSectionGesture?.orderKey ?? "",
         topLevelSectionOrder,
         [...lookup.parentKeyByItemId.entries()],
         [...lookup.nestParentIdByItemId.entries()],
         [...lookup.pinnedThreadIds],
       ]),
-    [lookup, projectionKey, topLevelSectionOrder],
+    [lookup, projectSectionGesture?.orderKey, projectionKey, topLevelSectionOrder],
   );
   const activeIdRef = useRef<string | null>(null);
   const nextGestureIdRef = useRef(0);
@@ -1036,6 +1094,21 @@ export function useSectionThreadDnd({
         latestRowCollisionRef.current = null;
         return [];
       }
+      if (typeof args.active.id === "string") {
+        const header = parseProjectSectionDropKey(args.active.id);
+        if (header?.sectionId) {
+          const projectId = header.projectId;
+          latestRowCollisionRef.current = null;
+          return reorderCollisionDetection({
+            ...args,
+            droppableContainers: args.droppableContainers.filter(({ id }) => {
+              if (typeof id !== "string") return false;
+              const parsed = parseProjectSectionDropKey(id);
+              return parsed?.projectId === projectId && parsed.sectionId !== null;
+            }),
+          });
+        }
+      }
       if (
         typeof args.active.id === "string" &&
         topLevelSectionIds.has(args.active.id)
@@ -1090,6 +1163,12 @@ export function useSectionThreadDnd({
       const allowedCollisions = collisions.filter(({ id }) => {
         if (typeof id !== "string" || draggedThreads === null) return true;
         const parentKey = resolveSectionThreadDropParentKey(lookup, id);
+        const sectionTarget = parentKey ? parseProjectSectionDropKey(parentKey) : null;
+        if (sectionTarget && typeof args.active.id === "string") {
+          const sourceKey = lookup.parentKeyByItemId.get(args.active.id);
+          const sourceProject = sourceKey ? projectIdFromSectionParent(sourceKey) : null;
+          if (sourceProject !== null && sourceProject !== sectionTarget.projectId) return false;
+        }
         const projectId = parentKey
           ? lookup.projectIdByParentKey.get(parentKey)
           : undefined;
@@ -1134,6 +1213,25 @@ export function useSectionThreadDnd({
     useState<SectionThreadReorderTarget | null>(null);
   const [pendingDropDecision, setPendingDropDecision] =
     useState<SectionThreadDropDecision | null>(null);
+  const [projectSectionPreview, setProjectSectionPreview] =
+    useState<ProjectSectionDragPreview | null>(null);
+  const [projectSectionError, setProjectSectionError] =
+    useState<ProjectSectionDragError | null>(null);
+  const rpc = useRpc<typeof projectFirstSidebarRpcContract>();
+  const projectSectionStore = useProjectSectionStore();
+  const shownSectionRef = useRef(projectSectionGesture?.shownSectionByThreadId);
+  shownSectionRef.current = projectSectionGesture?.shownSectionByThreadId;
+  useEffect(() => {
+    const shown = projectSectionGesture?.shownSectionByThreadId;
+    if (!shown) return;
+    setProjectSectionPreview((current) => {
+      if (current === null || current.assignments.size === 0) return current;
+      const matched = [...current.assignments].every(
+        ([threadId, sectionId]) => shown.get(threadId) === sectionId,
+      );
+      return matched ? null : current;
+    });
+  }, [projectSectionGesture?.shownSectionByThreadId]);
   const pendingDropDecisionRef = useRef<SectionThreadDropDecision | null>(
     null,
   );
@@ -1163,6 +1261,74 @@ export function useSectionThreadDnd({
     pinnedInsertRef.current = null;
   }, [clearNestCandidate]);
   const clearProjectedDrag = clearDropState;
+  const commitProjectSectionAssignment = useCallback((
+    decision: ProjectSectionAssignmentDecision,
+  ) => {
+    setProjectSectionError(null);
+    setProjectSectionPreview({
+      assignments: new Map(decision.threadIds.map((threadId) => [threadId, decision.projectSectionId])),
+      order: null,
+    });
+    const requests = decision.threadIds.map((threadId) => (
+      decision.projectSectionId === null
+        ? rpc.call("clearProjectSectionAssignment", { threadId })
+        : rpc.call("assignProjectSection", {
+          threadId,
+          projectId: decision.projectId,
+          projectSectionId: decision.projectSectionId,
+        })
+    ));
+    return Promise.allSettled(requests).then(async (results) => {
+      const failed = results.some((result) => (
+        result.status === "rejected" || result.value.status !== "success"
+      ));
+      await projectSectionAssignmentStore.reread(decision.threadIds);
+      if (!failed) return;
+      setProjectSectionPreview(null);
+      setProjectSectionError({
+        projectId: decision.projectId,
+        message: "Не удалось изменить секцию проекта",
+      });
+      toast.error("Не удалось изменить секцию проекта");
+    });
+  }, [rpc]);
+  const commitProjectSectionReorder = useCallback(async (
+    projectId: string,
+    sectionIds: string[],
+  ) => {
+    setProjectSectionError(null);
+    setProjectSectionPreview({
+      assignments: new Map(),
+      order: { projectId, sectionIds },
+    });
+    try {
+      const result = await rpc.call("reorderProjectSections", {
+        expectedRevision: projectSectionGesture?.revision ?? 0,
+        projectId,
+        sectionIds,
+      });
+      if (result.status === "success") {
+        projectSectionStore?.apply(result.document);
+        setProjectSectionPreview(null);
+        return;
+      }
+    } catch {
+      // The mutation did not succeed. Reread below replaces the preview.
+    }
+    try {
+      const listed = await rpc.call("listProjectSections", null);
+      if (listed.status === "success") projectSectionStore?.apply(listed.document);
+      else projectSectionStore?.invalidate();
+    } catch {
+      projectSectionStore?.invalidate();
+    }
+    setProjectSectionPreview(null);
+    setProjectSectionError({
+      projectId,
+      message: "Не удалось изменить порядок секций проекта",
+    });
+    toast.error("Не удалось изменить порядок секций проекта");
+  }, [projectSectionGesture?.revision, projectSectionStore, rpc]);
   const isCurrentGesture = useCallback(
     (gesture: { id: number; projectionKey: string } | null) =>
       gesture !== null
@@ -1225,6 +1391,7 @@ export function useSectionThreadDnd({
       setRowDrop(null);
       setReorderTarget(null);
       setReadyNestCandidate(null);
+      setProjectSectionError(null);
     },
     [clearDropDwell, clearNestCandidate, lookup],
   );
@@ -1412,6 +1579,25 @@ export function useSectionThreadDnd({
         return;
       }
 
+      if (parseProjectSectionDropKey(activeId)?.sectionId) {
+        const headerMove = sameProjectSectionHeader(activeId, overId);
+        const nextOrder = headerMove === null || projectSectionGesture === undefined
+          ? null
+          : assembleProjectSectionReorder({
+            activeSectionId: headerMove.activeSectionId,
+            overSectionId: headerMove.overSectionId,
+            projectId: headerMove.projectId,
+            storedSectionIds: projectSectionGesture.storedSectionIdsByProject.get(headerMove.projectId) ?? [],
+            visibleSectionIds: projectSectionGesture.visibleSectionIdsByProject.get(headerMove.projectId) ?? [],
+          });
+        if (nextOrder && headerMove && isCurrentGesture(gesture)) {
+          void commitProjectSectionReorder(headerMove.projectId, [...nextOrder]);
+        }
+        gestureRef.current = null;
+        clearProjectedDrag();
+        return;
+      }
+
       const decision = resolveSectionThreadDropDecision(
         lookup,
         activeId,
@@ -1469,7 +1655,15 @@ export function useSectionThreadDnd({
           gestureRef.current = null;
           clearProjectedDrag();
           return;
+        case "assign-project-section":
+          if (isCurrentGesture(gesture)) {
+            void commitProjectSectionAssignment(decision);
+          }
+          gestureRef.current = null;
+          clearProjectedDrag();
+          return;
         case "rejected":
+        case "rejected-project-section":
         case "unchanged":
           gestureRef.current = null;
           clearProjectedDrag();
@@ -1483,6 +1677,8 @@ export function useSectionThreadDnd({
       clearNestCandidate,
       clearProjectedDrag,
       commitDropChanges,
+      commitProjectSectionAssignment,
+      commitProjectSectionReorder,
       decisionOptions,
       dragOverParentKey,
       enabled,
@@ -1491,6 +1687,7 @@ export function useSectionThreadDnd({
       lookup,
       onReorderPinnedThread,
       onTopLevelSectionOrderChange,
+      projectSectionGesture,
       projectedNestParentId,
       reorderTarget,
       rowDrop,
@@ -1544,5 +1741,7 @@ export function useSectionThreadDnd({
     pinnedItemIds:
       lookup.itemIdsByParentKey.get(PINNED_THREAD_PARENT_KEY) ?? [],
     pinnedReorderPending,
+    projectSectionPreview,
+    projectSectionError,
   };
 }

@@ -11,7 +11,7 @@ import { makePluginProject, makeSidebarThread } from "../model/fixtures.js";
 import { defaultPreferences } from "../../shared/preferences.js";
 import { defaultFilterDocument } from "../../shared/filters.js";
 import { windowFilterStore } from "../filters/filter-store.js";
-import { resetPreferencesSyncForTest, setPreferencesMirrorStorageForTest } from "../preferences/preferences-sync.js";
+import { flushPreferenceWritesForTest, resetPreferencesSyncForTest, setPreferencesMirrorStorageForTest } from "../preferences/preferences-sync.js";
 
 let restoreSidebarHook: (() => void) | null = null;
 const app = await loadPluginApp(() => import("../../app.js"));
@@ -53,15 +53,20 @@ async function mount(options: RenderSlotOptions = {}, initiallyShowSidebar = tru
   function Component() { const [, force] = useReducer((value) => value + 1, 0); renderParent = force; const [visible, setVisible] = useState(initiallyShowSidebar); showSidebar = () => setVisible(true); return <><QuickThreadSearch />{visible ? <ThreadList activeThreadId={null} activeProjectId={null} isCompactViewport={false} onNavigate={() => {}} searchQuery="" /> : null}</>; }
   const list = vi.fn(async (args: Parameters<PluginBrowserBbSdk["threads"]["list"]>[0] = {}) => args.offset ? [] : args.archived ? [archived] : [current, sibling]);
   const get = vi.fn(async ({ threadId }: Parameters<PluginBrowserBbSdk["threads"]["get"]>[0]) => makeThreadResponse({ ...(threadId === archived.id ? archived : threadId === sibling.id ? sibling : current), id: threadId }));
+  const rpc = { listPreferences: () => ({ preferences: defaultPreferences() }), setPreference: (input: unknown) => input,
+      listFilters: () => ({ status: "success", document: { ...defaultFilterDocument(), revision: (windowFilterStore.getSnapshot().document?.revision ?? 0) + 1,
+        filters: [{ id: "app-only", name: "Рабочие", rule: { kind: "projectIds", projectIds: ["app"] } }] } }) ,
+      listProjectSections: () => ({ status: "success", document: { schemaVersion: 1, revision: 0, sections: [], order: [] } }),
+      readProjectSectionMetadata: (input: unknown) => ({ status: "success", threads: ((input as { threadIds: string[] }).threadIds).map((threadId) => ({ threadId, metadata: {} })) }),
+    };
   const view = renderSlot({ component: Component }, {}, {
     pluginId: "project-first-sidebar",
     sidebarThreads: { status: "ready", projects: [makePluginProject({ id: "app", name: "App" })],
       sections: [], threads: [makeSidebarThread({ id: "current", projectId: "app", title: current.title, updatedAt: 5 })] },
-    rpc: { listPreferences: () => ({ preferences: defaultPreferences() }), setPreference: (input: unknown) => input,
-      listFilters: () => ({ status: "success", document: { ...defaultFilterDocument(), revision: (windowFilterStore.getSnapshot().document?.revision ?? 0) + 1,
-        filters: [{ id: "app-only", name: "Рабочие", rule: { kind: "projectIds", projectIds: ["app"] } }] } }) },
+
     sdk: { subscribe: () => () => {}, projects: { list: async () => [project] }, threads: { list, get } },
     ...options,
+    rpc: { ...rpc, ...options.rpc },
   });
   await waitFor(() => expect(windowFilterStore.getSnapshot().status).toBe("ready"));
   act(() => requestQuickThreadSearch());
@@ -105,6 +110,24 @@ describe("keyboard quick navigation", () => {
     await screen.findByRole("combobox", { name: "Найти тред" });
     await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(2));
     expect(Number.parseInt(screen.getAllByRole("option")[0].style.height)).toBeLessThanOrEqual(44);
+  });
+  it("opens from the sidebar, ranks literal results first and opens the title found with a typo", async () => {
+    const literal = entry({ id: "literal", title: "Публкации", updatedAt: 1 });
+    const { view } = await mount({ sdk: { subscribe: () => () => {}, projects: { list: async () => [project] }, threads: {
+      list: async ({ offset } = {}) => offset ? [] : [current, literal],
+      get: async () => makeThreadResponse(current),
+    } } });
+    fireEvent.keyDown(screen.getByRole("combobox", { name: "Выбрать фильтр" }), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    fireEvent.click(screen.getByRole("button", { name: "Найти тред по фильтру" }));
+    const input = await chooseFilter();
+    fireEvent.change(input, { target: { value: "публкации" } });
+    expect(screen.getByRole("option", { selected: true }).getAttribute("title")).toBe(literal.title);
+    expect(screen.getAllByRole("option").map((option) => option.getAttribute("title"))).toEqual([literal.title, current.title]);
+    fireEvent.change(input, { target: { value: "исс/публкации" } });
+    expect(screen.getByRole("option", { selected: true }).getAttribute("title")).toBe(current.title);
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(view.inspection.navigateCalls).toContainEqual({ method: "toThread", threadId: "current" }));
   });
   it("filters and highlights effective project separately from title, preserving the chosen filter", async () => {
     const target = entry({ id: "child", projectId: "other", parentThreadId: "parent", title: "Настройка сравнения" });
@@ -272,6 +295,64 @@ describe("keyboard quick navigation", () => {
     expect(list.mock.calls.every(([args]) => !args?.archived)).toBe(true);
     expect(windowFilterStore.getSnapshot().activeFilterId).toBe("app-only");
     expect(document.querySelector('a[data-sidebar-thread-id="parent"]')).toBeNull();
+  });
+  it("waits for project-section metadata and opens only the matching collapsed section", async () => {
+    let release!: () => void;
+    const metadataReady = new Promise<void>((resolve) => { release = resolve; });
+    const { view } = await mount({ rpc: {
+      listPreferences: () => ({ preferences: { ...defaultPreferences(), collapsedThreadSections: ["project-section:app::alpha", "project-section:app::beta"] } }),
+      listProjectSections: () => ({ status: "success", document: { schemaVersion: 1, revision: 1,
+        sections: [{ id: "alpha", projectId: "app", name: "Alpha" }, { id: "beta", projectId: "app", name: "Beta" }],
+        order: [{ projectId: "app", sectionIds: ["alpha", "beta"] }] } }),
+      readProjectSectionMetadata: async (input: unknown) => {
+        await metadataReady;
+        return { status: "success", threads: (input as { threadIds: string[] }).threadIds.map((threadId) => ({ threadId,
+          metadata: threadId === "current" ? { projectId: "app", projectSectionId: "alpha" } : {} })) };
+      },
+    } });
+    const input = await chooseFilter(); fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(view.inspection.navigateCalls).toContainEqual({ method: "toThread", threadId: "current" }));
+    expect(document.activeElement?.getAttribute("data-sidebar-thread-id")).not.toBe("current");
+    await act(async () => release());
+    await waitFor(() => expect(document.activeElement?.getAttribute("data-sidebar-thread-id")).toBe("current"));
+    expect(document.activeElement?.closest("[data-project-section-id]")?.getAttribute("data-project-section-id")).toBe("alpha");
+    expect(document.querySelector('[data-project-section-id="beta"]')?.getAttribute("data-project-section-collapsed")).toBe("true");
+  });
+  it("re-reads ancestry if a thread moves while project-section metadata is loading", async () => {
+    let release!: () => void;
+    const metadataReady = new Promise<void>((resolve) => { release = resolve; });
+    const p = entry({ id: "p", title: "P", updatedAt: 1 });
+    const q = entry({ id: "q", title: "Q", updatedAt: 1 });
+    const target = { ...current, parentThreadId: "p" };
+    const pRow = makeSidebarThread({ id: "p", projectId: "app", title: "P" });
+    const qRow = makeSidebarThread({ id: "q", projectId: "app", title: "Q" });
+    const targetRow = makeSidebarThread({ id: "current", projectId: "app", title: current.title, parentThreadId: "p" });
+    let state: PluginSidebarThreadsState = { status: "ready", projects: [makePluginProject({ id: "app", name: "App" })], sections: [], threads: [pRow, qRow, targetRow], experimental_archived: null };
+    type SidebarHook = typeof import("@get-bb/plugin-sdk/app").experimental_useSidebarThreads;
+    const runtime: { experimental_useSidebarThreads: SidebarHook } = Reflect.get(Reflect.get(globalThis, "__bbPluginRuntime"), "pluginSdkApp");
+    const originalHook = runtime.experimental_useSidebarThreads;
+    runtime.experimental_useSidebarThreads = (...args) => { originalHook(...args); return state; };
+    restoreSidebarHook = () => { runtime.experimental_useSidebarThreads = originalHook; };
+    const { view, refreshSidebar } = await mount({
+      rpc: {
+        listPreferences: () => ({ preferences: { ...defaultPreferences(), collapsedThreads: ["p", "q"] } }),
+        readProjectSectionMetadata: async (input: unknown) => { await metadataReady; return { status: "success", threads: (input as { threadIds: string[] }).threadIds.map((threadId) => ({ threadId, metadata: {} })) }; },
+      },
+      sdk: { subscribe: () => () => {}, projects: { list: async () => [project] }, threads: {
+        list: async ({ offset } = {}) => offset ? [] : [target, p, q], get: async ({ threadId }) => makeThreadResponse(threadId === "p" ? p : target),
+      } },
+    });
+    const input = await chooseFilter(); fireEvent.change(input, { target: { value: "исс" } }); fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => expect(view.inspection.navigateCalls).toContainEqual({ method: "toThread", threadId: "current" }));
+    // Keep metadata pending across at least one placement polling interval.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 60)); });
+    act(() => { state = { ...state, threads: [pRow, qRow, { ...targetRow, parentThreadId: "q" }] }; refreshSidebar(); });
+    await act(async () => release());
+    await waitFor(() => expect(document.activeElement?.getAttribute("data-sidebar-thread-id")).toBe("current"));
+    await flushPreferenceWritesForTest();
+    const collapseWrites = view.inspection.rpcCalls.filter((call) => call.method === "setPreference" && call.input !== null && typeof call.input === "object" && "key" in call.input && call.input.key === "collapsedThreads");
+    expect(collapseWrites.at(-1)?.input).toEqual({ key: "collapsedThreads", value: ["p"] });
+    expect(screen.getByRole("button", { name: "Collapse Q threads" })).toBeTruthy();
   });
   it("refreshes complete metadata on relevant realtime changes, not every streaming delta", async () => {
     let change: (changes: "thread-created"[] | "events-appended"[]) => void = () => {};

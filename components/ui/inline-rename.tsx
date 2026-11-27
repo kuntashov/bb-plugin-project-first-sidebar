@@ -9,7 +9,7 @@ import {
 import { useIsCompactViewport } from "./hooks/use-compact-viewport";
 
 export interface InlineRenameArgs {
-  kind: "thread" | "project" | "section" | "environment" | "machine";
+  kind: "thread" | "project" | "section" | "project-section" | "environment" | "machine";
   id: string;
   name: string;
   label: string;

@@ -9,7 +9,7 @@ import { useFilterDocumentSync } from "../filters/use-filter-document-sync.js";
 import { projectSidebarSnapshot } from "../model/sidebar-projection.js";
 import { useSidebarData } from "../model/use-sidebar-data.js";
 import { buildPinnedSidebarState } from "../model/pinned-sidebar-threads.js";
-import { useExpandSidebarThreadPath } from "../list/useSidebarThreadReveal.js";
+import { projectSectionRevealPlacement, useExpandSidebarThreadPath } from "../list/useSidebarThreadReveal.js";
 import { usePreferencesReady, usePreferencesSync } from "../preferences/PreferencesSync.js";
 import { sidebarHiddenGroupsAtom, sidebarOrganizationModeAtom, sidebarThreadLifecyclesAtom, collapsedProjectIdsAtom, collapsedSidebarSectionIdsAtom } from "../preferences/atoms.js";
 import { planThreadReveal } from "./reveal-plan.js";
@@ -18,6 +18,12 @@ import { loadRevealChain, loadRevealTarget } from "./reveal-data.js";
 import "./reveal.css";
 
 const REQUEST_EVENT = "project-first-sidebar:reveal-thread";
+
+function mountedProjectSectionStatus(): "loading" | "ready" | "error" {
+  const value = document.querySelector("[data-project-section-status]")?.getAttribute("data-project-section-status");
+  if (value === "ready" || value === "error") return value;
+  return "loading";
+}
 export function requestThreadReveal(threadId: string): void {
   window.dispatchEvent(new CustomEvent(REQUEST_EVENT, { detail: threadId }));
 }
@@ -133,7 +139,7 @@ export function ThreadReveal() {
           const groupId = plan.hiddenGroupId;
           store.set(sidebarHiddenGroupsAtom, (ids) => ids.filter((id) => id !== groupId));
         }
-        const target = await loadRevealTarget(chain, () => latest.current.data, signal);
+        await loadRevealTarget(chain, () => latest.current.data, signal);
         signal.throwIfAborted();
         const snapshot = windowFilterStore.getSnapshot();
         const projection = projectSidebarSnapshot({ activeFilterId: snapshot.activeFilterId, document: snapshot.document,
@@ -142,10 +148,47 @@ export function ThreadReveal() {
           windowFilterStore.setActiveFilterId(ALL_FILTER_ID);
           toast.info("Выбран отбор «Все», чтобы показать тред.");
         }
-        latest.current.expandPath({ thread: target,
-          threadById: new Map(latest.current.data.threads.map((item) => [item.id, item])),
-          effectivePinnedThreadIds: buildPinnedSidebarState({ threads: latest.current.data.threads }).effectivePinnedThreadIds,
-          personalProjectId: personalId,
+        const admittedPath = () => {
+          const data = latest.current.data;
+          const filters = windowFilterStore.getSnapshot();
+          const admitted = projectSidebarSnapshot({
+            activeFilterId: filters.activeFilterId,
+            document: filters.document,
+            snapshot: { projects: data.projects, threads: data.threads },
+          });
+          const thread = data.threads.find((item) => item.id === threadId);
+          const visibleById = new Map(
+            data.threads
+              .filter((item) => admitted.visible.threadIds.has(item.id))
+              .map((item) => [item.id, item]),
+          );
+          return {
+            data,
+            thread,
+            visibleById,
+            pinnedIds: buildPinnedSidebarState({ threads: data.threads }).effectivePinnedThreadIds,
+            visible: thread !== undefined && admitted.visible.threadIds.has(thread.id),
+          };
+        };
+        await waitForReveal(() => {
+          const current = admittedPath();
+          if (!current.visible || !current.thread) return false;
+          return !projectSectionRevealPlacement({
+            thread: current.thread,
+            threadById: current.visibleById,
+            organizationMode: store.get(sidebarOrganizationModeAtom),
+            personalProjectId: current.data.personalProject?.id ?? null,
+            pinned: current.pinnedIds.has(current.thread.id),
+            sectionStatus: mountedProjectSectionStatus(),
+          }).pending;
+        }, signal);
+        const current = admittedPath();
+        if (!current.thread || !current.visible) throw new Error("Тред отсутствует в доступном списке. Его состояние могло измениться; повторите команду.");
+        latest.current.expandPath({
+          thread: current.thread,
+          threadById: current.visibleById,
+          effectivePinnedThreadIds: current.pinnedIds,
+          personalProjectId: current.data.personalProject?.id ?? null,
         });
         row = await positionRevealThread(root, threadId, signal);
       }
