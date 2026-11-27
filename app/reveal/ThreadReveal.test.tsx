@@ -88,6 +88,7 @@ describe("explicit reveal through the mounted sidebar", () => {
   it.each(["Отмена", "Escape"])("cancels combined archive/group changes without writes or changing the filter: %s", async (action) => {
     const archived = { ...child, isArchived: true, archivedAt: 1 };
     const { rpcCalls, inspection } = await mount({ hiddenGroups: ["project:app"] }, [parent, archived]);
+    const afterMount = inspection.sdkCalls.length;
     act(() => windowFilterStore.setActiveFilterId("web-only"));
     await reveal();
     const dialog = await screen.findByRole("dialog");
@@ -101,7 +102,7 @@ describe("explicit reveal through the mounted sidebar", () => {
     await flushPreferenceWritesForTest();
     expect(windowFilterStore.getSnapshot().activeFilterId).toBe("web-only");
     expect(rpcCalls.filter((call) => call.method === "setPreference")).toEqual([]);
-    expect(inspection.sdkCalls).toEqual([]);
+    expect(inspection.sdkCalls.slice(afterMount)).toEqual([]);
   });
 
   it("does not expand a hidden group automatically before the confirmation", async () => {
@@ -136,19 +137,21 @@ describe("explicit reveal through the mounted sidebar", () => {
   it("shows the archived thread after consent, restores only its group and preserves its lifecycle", async () => {
     const archived = { ...child, isArchived: true, archivedAt: 1 };
     const { rpcCalls, inspection } = await mount({ hiddenGroups: ["project:app", "project:web"] }, [parent, archived]);
+    const afterMount = inspection.sdkCalls.length;
     await reveal();
     fireEvent.click(await screen.findByRole("button", { name: "Показать в дереве" }));
     await waitFor(() => expect(document.activeElement).toBe(row()));
     await flushPreferenceWritesForTest();
     expect(rpcCalls).toContainEqual({ method: "setPreference", input: { key: "threadLifecycles", value: ["active", "archived"] } });
     expect(rpcCalls).toContainEqual({ method: "setPreference", input: { key: "hiddenGroups", value: ["project:web"] } });
-    expect(inspection.sdkCalls).toEqual([]);
+    expect(inspection.sdkCalls.slice(afterMount)).toEqual([]);
     expect(archived.isArchived).toBe(true);
   });
 
   it("goes to the project without changing archive or hidden thread status", async () => {
     const hidden = { ...child, isHidden: true, isArchived: true, archivedAt: 1 };
     const { rpcCalls, inspection } = await mount({ hiddenGroups: ["project:app"] }, [parent, hidden]);
+    const afterMount = inspection.sdkCalls.length;
     act(() => windowFilterStore.setActiveFilterId("web-only"));
     await reveal();
     fireEvent.click(await screen.findByRole("button", { name: "Перейти к проекту" }));
@@ -156,7 +159,7 @@ describe("explicit reveal through the mounted sidebar", () => {
     await flushPreferenceWritesForTest();
     expect(windowFilterStore.getSnapshot().activeFilterId).toBe("all");
     expect(rpcCalls.filter((call) => call.method === "setPreference").map((call) => call.input)).not.toContainEqual(expect.objectContaining({ key: "threadLifecycles" }));
-    expect(inspection.sdkCalls).toEqual([]);
+    expect(inspection.sdkCalls.slice(afterMount)).toEqual([]);
   });
 
   it("finds the personal destination even if all its threads are hidden", async () => {

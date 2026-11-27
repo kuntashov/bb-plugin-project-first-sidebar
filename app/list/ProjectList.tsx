@@ -1,3 +1,4 @@
+import { ThreadStatusPanel, ThreadStatusProvider } from "../thread-status/ThreadStatusPanel.js";
 import {
   ThreadListVisibility,
   ThreadListMore,
@@ -1813,7 +1814,7 @@ function ProjectListComponent({
     );
   }
 
-  return (
+  const projectList = (
     <SidebarHeaderActionsProvider
       value={{
         onNewSection: handleOpenCreateSectionDialog,
@@ -1823,6 +1824,7 @@ function ProjectListComponent({
       <ProjectListShell
         header={<ProjectFilterPanel onManageFilters={onManageFilters} />}
       >
+        <ThreadStatusPanel threads={threads} onNavigate={onProjectSelect} />
         <SidebarDraftPresenceSync />
         <SidebarProjectionKeyProvider value={projection.projectionKey}>
           <ActiveSidebarModeSections
@@ -1968,6 +1970,7 @@ function ProjectListComponent({
       {sectionDeleteDialogContent}
     </SidebarHeaderActionsProvider>
   );
+  return <ThreadStatusProvider threads={sidebarData.threads}>{projectList}</ThreadStatusProvider>;
 }
 
 export const ProjectList = memo(function ProjectList(props: ProjectListProps) {
