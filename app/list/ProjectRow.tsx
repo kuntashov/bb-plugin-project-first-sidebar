@@ -131,6 +131,13 @@ import {
 import { buildSidebarEntitySectionId } from "../model/sidebar-section-order.js";
 import { SidebarWindowedItems } from "./SidebarWindowedItems.js";
 import { SidebarSectionRow } from "./SidebarSectionRow.js";
+import {
+  CreateProjectSectionMenuItem,
+  ProjectSectionCreateDialog,
+  ProjectSectionList,
+} from "../project-sections/ProjectSectionRows.js";
+import { ProjectSectionPlacement } from "../project-sections/ProjectSectionPlacement.js";
+import { useProjectSectionStore } from "../project-sections/ProjectSectionSync.js";
 import { TopLevelSidebarSection } from "./TopLevelSidebarSection.js";
 import {
   sidebarCollapsedThreadSectionsAtom,
@@ -214,6 +221,7 @@ export interface ProjectRowProps {
 interface ProjectThreadTreeProps {
   projectId?: string;
   dndParentKey?: string;
+  depthOffset?: number;
   rootItems?: readonly ProjectThreadItem[];
   threadListState: ProjectThreadListState;
   compareThreads: ThreadComparator;
@@ -1811,6 +1819,7 @@ function SectionThreadTreeItems({
 export const ProjectThreadTree = memo(function ProjectThreadTree({
   projectId,
   dndParentKey,
+  depthOffset = 0,
   rootItems: providedRootItems,
   threadListState,
   compareThreads,
@@ -1867,7 +1876,8 @@ export const ProjectThreadTree = memo(function ProjectThreadTree({
       items={rootItems}
       sectionDnd={dndParentKey !== undefined ? sectionDnd : null}
       projectId={projectId}
-      sortableParentKey={projectId}
+      depthOffset={depthOffset}
+      sortableParentKey={dndParentKey ?? projectId}
       selectedThreadId={selectedThreadId}
       collapsedThreadIds={collapsedThreadIds}
       collapsedEnvironmentIds={collapsedEnvironmentIds}
@@ -2163,6 +2173,9 @@ function ProjectRowComponent({
   const [isDropdownActionsOpen, setIsDropdownActionsOpen] = useState(false);
   const [isContextActionsOpen, setIsContextActionsOpen] = useState(false);
   const [isRemoveDialogOpen, setIsRemoveDialogOpen] = useState(false);
+  const [isCreateSectionOpen, setIsCreateSectionOpen] = useState(false);
+  const projectSectionStore = useProjectSectionStore();
+  const canCreateProjectSection = projectSectionStore !== null && !project.isPersonal;
   const [isRemovePending, setIsRemovePending] = useState(false);
   const isActionsOpen = isDropdownActionsOpen || isContextActionsOpen;
   const projectThreads = useMemo(
@@ -2204,6 +2217,7 @@ function ProjectRowComponent({
     <SidebarHeaderControls
       label={project.name}
       sectionId={buildSidebarEntitySectionId("project", project.id)}
+      showNewSection={project.isPersonal ? undefined : false}
       onNewThread={onCreateProjectThread ? handleCreateThread : undefined}
       onOpenChange={setIsDropdownActionsOpen}
       onCloseAutoFocus={rename.onCloseAutoFocus}
@@ -2214,7 +2228,15 @@ function ProjectRowComponent({
         onRename={rename.startEditingFromMenu}
         onRemove={requestRemove}
         extraActions={(surface) => (
-          <ThreadListVisibilityMenuItems surface={surface} />
+          <>
+            <ThreadListVisibilityMenuItems surface={surface} />
+            {canCreateProjectSection ? (
+              <CreateProjectSectionMenuItem
+                surface={surface}
+                onSelect={() => setIsCreateSectionOpen(true)}
+              />
+            ) : null}
+          </>
         )}
       />
     </SidebarHeaderControls>
@@ -2224,7 +2246,15 @@ function ProjectRowComponent({
     <>
       <ProjectActionsContextMenu
         extraActions={(surface) => (
-          <ThreadListVisibilityMenuItems surface={surface} />
+          <>
+            <ThreadListVisibilityMenuItems surface={surface} />
+            {canCreateProjectSection ? (
+              <CreateProjectSectionMenuItem
+                surface={surface}
+                onSelect={() => setIsCreateSectionOpen(true)}
+              />
+            ) : null}
+          </>
         )}
         project={project}
         disabled={rename.isEditing}
@@ -2256,22 +2286,44 @@ function ProjectRowComponent({
             sectionRef={projectRowRef}
             sectionStyle={projectRowStyle}
           >
-            <ProjectThreadTree
-              projectId={project.id}
-              dndParentKey={buildSidebarEntitySectionId("project", project.id)}
-              rootItems={rootItems}
-              threadListState={threadListState}
-              selectedThreadId={selectedThreadId}
-              collapsedThreadIds={collapsedThreadIds}
-              collapsedEnvironmentIds={collapsedEnvironmentIds}
-              compareThreads={compareThreads}
-              onProjectSelect={onProjectSelect}
-              onToggleThreadCollapsed={onToggleThreadCollapsed}
-              onToggleEnvironmentCollapsed={onToggleEnvironmentCollapsed}
-            />
+            {canCreateProjectSection ? (
+              <ProjectSectionPlacement
+                projectId={project.id}
+                threads={threadListState.status === "ready" ? threadListState.threads : []}
+                threadListStatus={threadListState.status}
+                compareThreads={compareThreads}
+                selectedThreadId={selectedThreadId}
+                collapsedThreadIds={collapsedThreadIds}
+                collapsedEnvironmentIds={collapsedEnvironmentIds}
+                onProjectSelect={onProjectSelect}
+                onToggleThreadCollapsed={onToggleThreadCollapsed}
+                onToggleEnvironmentCollapsed={onToggleEnvironmentCollapsed}
+              />
+            ) : (
+              <ProjectThreadTree
+                projectId={project.id}
+                dndParentKey={buildSidebarEntitySectionId("project", project.id)}
+                rootItems={rootItems}
+                threadListState={threadListState}
+                selectedThreadId={selectedThreadId}
+                collapsedThreadIds={collapsedThreadIds}
+                collapsedEnvironmentIds={collapsedEnvironmentIds}
+                compareThreads={compareThreads}
+                onProjectSelect={onProjectSelect}
+                onToggleThreadCollapsed={onToggleThreadCollapsed}
+                onToggleEnvironmentCollapsed={onToggleEnvironmentCollapsed}
+              />
+            )}
           </TopLevelSidebarSection>
         </div>
       </ProjectActionsContextMenu>
+      {canCreateProjectSection ? (
+        <ProjectSectionCreateDialog
+          open={isCreateSectionOpen}
+          projectId={project.id}
+          onOpenChange={setIsCreateSectionOpen}
+        />
+      ) : null}
       <ConfirmDeleteDialog
         open={isRemoveDialogOpen}
         onOpenChange={setIsRemoveDialogOpen}

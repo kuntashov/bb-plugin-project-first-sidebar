@@ -27,6 +27,7 @@ import { useWindowFilterSnapshot } from "./use-filter-snapshot.js";
 export interface ProjectFilterPanelProps {
   store?: WindowFilterStore;
   onManageFilters?: (trigger: HTMLButtonElement) => void;
+  onQuickSearch?: () => void;
 }
 
 interface FilterOption {
@@ -43,6 +44,7 @@ const BUILT_IN_FILTERS: readonly FilterOption[] = [
 export function ProjectFilterPanel({
   store = windowFilterStore,
   onManageFilters,
+  onQuickSearch,
 }: ProjectFilterPanelProps) {
   useFilterDocumentSync(store);
   const snapshot = useWindowFilterSnapshot(store);
@@ -155,6 +157,13 @@ export function ProjectFilterPanel({
             );
           })}
         </div>
+        {onQuickSearch ? (
+          <Button type="button" variant="ghost" size="icon" aria-label="Найти тред по фильтру"
+            aria-haspopup="dialog" className={SIDEBAR_CONTROL_BUTTON_CLASS}
+            onClick={onQuickSearch}>
+            <Icon name="Search" className={COARSE_POINTER_ICON_SIZE_CLASS} aria-hidden="true" />
+          </Button>
+        ) : null}
         {onManageFilters ? (
           <DropdownMenu open={menuOpen} onOpenChange={(open) => {
             setMenuOpen(open);

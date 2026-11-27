@@ -3,6 +3,7 @@ import type {
   PluginSidebarThread,
 } from "@get-bb/plugin-sdk/app";
 import type { SidebarProject } from "./use-sidebar-data.js";
+import type { ThreadActivity } from "./thread-activity.js";
 
 export type SidebarThreadEnvironment = NonNullable<
   PluginSidebarThread["environment"]
@@ -11,7 +12,7 @@ export type SidebarThreadEnvironment = NonNullable<
 export type SidebarThreadOverrides = Partial<
   Omit<PluginSidebarThread, "activity">
 > & {
-  activity?: Partial<PluginSidebarThread["activity"]>;
+  activity?: Partial<ThreadActivity>;
 };
 
 function defaultDisplayTitle(
@@ -52,6 +53,14 @@ export function makeSidebarThread(
   const latestAttentionAt = overrides.latestAttentionAt ?? 1;
   const pinnedAt = overrides.pinnedAt ?? null;
   const archivedAt = overrides.archivedAt ?? null;
+  const activity: ThreadActivity = {
+    workflows: 0,
+    backgroundAgents: 0,
+    backgroundCommands: 0,
+    planMode: 0,
+    goals: 0,
+    ...overrides.activity,
+  };
   return {
     id,
     projectId,
@@ -87,14 +96,7 @@ export function makeSidebarThread(
     lastReadAt,
     latestAttentionAt,
     ...overrides,
-    activity: {
-      workflows: 0,
-      backgroundAgents: 0,
-      backgroundCommands: 0,
-      planMode: 0,
-      goals: 0,
-      ...overrides.activity,
-    },
+    activity,
   };
 }
 

@@ -90,12 +90,31 @@ describe("filter admission and the real sidebar reveal hook", () => {
     backend = null;
   });
 
-  async function mountRevealScenario(initiallyUnread = false) {
+  async function mountRevealScenario(initiallyUnread = false, withSection = false) {
     setPreferencesMirrorStorageForTest(null);
     windowFilterStore.setActiveFilterId("all");
     const host = createFakePluginHost({ pluginId: "project-first-sidebar" });
     backend = host;
     await server(host.bb);
+    let alphaId: string | null = null;
+    let betaId: string | null = null;
+    if (withSection) {
+      const alpha = await host.harness.behavior.callRpc("createProjectSection", {
+        expectedRevision: 0, projectId: "proj_app", name: "Alpha",
+      }) as { status: string; document?: { sections: { id: string; name: string }[] } };
+      const beta = await host.harness.behavior.callRpc("createProjectSection", {
+        expectedRevision: 1, projectId: "proj_app", name: "Beta",
+      }) as { status: string; document?: { sections: { id: string; name: string }[] } };
+      if (alpha.status !== "success" || beta.status !== "success") throw new Error("project section was not created");
+      alphaId = alpha.document?.sections.find((section) => section.name === "Alpha")?.id ?? null;
+      betaId = beta.document?.sections.find((section) => section.name === "Beta")?.id ?? null;
+      if (!alphaId || !betaId) throw new Error("project section id is missing");
+    }
+    const sectionMetadata: Record<string, Record<string, unknown>> = alphaId && betaId ? {
+      thr_parent: { projectId: "proj_app", projectSectionId: alphaId },
+      thr_sibling: { projectId: "proj_app", projectSectionId: alphaId },
+      thr_child: { projectId: "proj_app", projectSectionId: betaId },
+    } : {};
     const preferences: PreferenceValues = {
       ...defaultPreferences(),
       organizationMode: "project",
@@ -104,7 +123,9 @@ describe("filter admission and the real sidebar reveal hook", () => {
       collapsedEnvironments: ["env_app"],
       collapsedMachines: ["host_app"],
       collapsedSections: ["pinned"],
-      collapsedThreadSections: ["section:untouched"],
+      collapsedThreadSections: alphaId && betaId
+        ? ["section:untouched", `project-section:proj_app::${alphaId}`, `project-section:proj_app::${betaId}`]
+        : ["section:untouched"],
     };
     for (const [key, value] of Object.entries(preferences)) {
       await host.harness.behavior.callRpc("setPreference", { key, value });
@@ -123,7 +144,10 @@ describe("filter admission and the real sidebar reveal hook", () => {
       name: "Web glob",
       rule: { kind: "nameGlobs", globs: ["W?b*"] },
     });
-    const environment = makeSidebarEnvironment({ id: "env_app" });
+    const environment = makeSidebarEnvironment({
+      id: "env_app",
+      ...(withSection ? { name: "linked", isWorktree: true, providerId: "git-worktree" } : {}),
+    });
     const readThread = { lastReadAt: 1, latestAttentionAt: 1 };
     const source = createMutableSidebarRegistration({
       status: "ready",
@@ -141,6 +165,9 @@ describe("filter admission and the real sidebar reveal hook", () => {
           ...readThread, id: "thr_child", projectId: "proj_app", environment,
           parentThreadId: "thr_parent", latestAttentionAt: initiallyUnread ? 2 : 1,
         }),
+        ...(withSection ? [makeSidebarThread({
+          ...readThread, id: "thr_sibling", projectId: "proj_app", environment,
+        })] : []),
       ],
     }, { projectId: PERSONAL_PROJECT_ID, threadId: "thr_personal" });
     const listProps = props();
@@ -150,6 +177,14 @@ describe("filter admission and the real sidebar reveal hook", () => {
         listPreferences: () => host.harness.behavior.callRpc("listPreferences", null),
         setPreference: (input) => host.harness.behavior.callRpc("setPreference", input),
         listFilters: () => host.harness.behavior.callRpc("listFilters", null),
+        listProjectSections: () => host.harness.behavior.callRpc("listProjectSections", null),
+        readProjectSectionMetadata: (input: unknown) => ({
+          status: "success" as const,
+          threads: ((input as { threadIds?: string[] } | null)?.threadIds ?? []).map((threadId) => ({
+            threadId,
+            metadata: sectionMetadata[threadId] ?? {},
+          })),
+        }),
       },
     });
     const readPreferences = async () => projectFirstSidebarRpcContract.listPreferences.output.parse(
@@ -166,7 +201,8 @@ describe("filter admission and the real sidebar reveal hook", () => {
     expect(await readPreferences()).toEqual(preferences);
     expect(collapseWrites()).toEqual([]);
     return {
-      preferences, readPreferences, flush, collapseWrites,
+      preferences, readPreferences, flush, collapseWrites, sectionId: alphaId, otherSectionId: betaId,
+      container: slot.container,
       async setDisplayMode(displayMode: FilterDisplayMode) {
         const snapshotBefore = JSON.stringify(source.getSidebarState());
         const current = projectFirstSidebarRpcContract.listFilters.output.parse(await host.harness.behavior.callRpc("listFilters", null));
@@ -258,4 +294,33 @@ describe("filter admission and the real sidebar reveal hook", () => {
       expect(scenario.collapseWrites().length).toBeGreaterThan(0);
     },
   );
+
+  it("expands the visible thread's project section without changing the active filter", async () => {
+    const scenario = await mountRevealScenario(false, true);
+    await scenario.navigate("thr_child");
+    await waitFor(() => {
+      const link = scenario.container.querySelector("[data-sidebar-thread-id='thr_child']");
+      expect(link?.closest("[data-project-section-id]")?.getAttribute("data-project-section-id")).toBe(scenario.sectionId);
+    });
+    expect(windowFilterStore.getSnapshot().activeFilterId).toBe("all");
+    await waitFor(async () => expect(await scenario.readPreferences()).toEqual({
+      ...scenario.preferences,
+      collapsedProjects: ["proj_web"],
+      collapsedThreads: [],
+      collapsedEnvironments: [],
+      collapsedThreadSections: ["section:untouched", `project-section:proj_app::${scenario.otherSectionId}`],
+    }));
+  });
+
+  it("does not open a thread outside the active filter or expand its project section", async () => {
+    const scenario = await mountRevealScenario(false, true);
+    await scenario.select("Web static");
+    const filterId = windowFilterStore.getSnapshot().activeFilterId;
+    expect(filterId).not.toBe("all");
+    await scenario.navigate("thr_child");
+    expect(scenario.collapseWrites()).toEqual([]);
+    expect(await scenario.readPreferences()).toEqual(scenario.preferences);
+    expect(windowFilterStore.getSnapshot().activeFilterId).toBe(filterId);
+    expect(scenario.container.querySelector("[data-sidebar-thread-id='thr_child']")).toBeNull();
+  });
 });

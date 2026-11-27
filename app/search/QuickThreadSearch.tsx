@@ -31,7 +31,7 @@ function Highlight({ text, ranges }: { text: string; ranges: readonly MatchRange
     return <span key={range.start}>{prefix}<mark>{text.slice(range.start, range.end)}</mark></span>;
   })}{text.slice(offset)}</>;
 }
-interface Option { id: string; name: string; icon?: IconDefinition; thread?: SearchThread; detail?: string; detailRanges?: MatchRange[]; ranges: MatchRange[] }
+interface Option { id: string; name: string; icon?: IconDefinition; thread?: SearchThread; detail?: string; detailRanges?: MatchRange[]; ranges: MatchRange[]; fuzzyParts?: number }
 const FILTER_ROW_HEIGHT = 32;
 const THREAD_ROW_HEIGHT = 44;
 const LIST_HEIGHT = 308;
@@ -102,8 +102,8 @@ function SearchSession({ prepare, accept, close }: {
         const projectName = projectNames.get(projectId) ?? projectId;
         const match = matchThreadQuery(name, projectName, query);
         if (match === null) return [];
-        return [{ id: thread.id, name, thread, detail: `${projectName}${thread.archivedAt !== null ? " · Архив" : ""}`, ranges: match.titleRanges, detailRanges: match.projectRanges }];
-      }).sort((a, b) => b.thread!.updatedAt - a.thread!.updatedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+        return [{ id: thread.id, name, thread, detail: `${projectName}${thread.archivedAt !== null ? " · Архив" : ""}`, ranges: match.titleRanges, detailRanges: match.projectRanges, fuzzyParts: match.fuzzyParts ?? 0 }];
+      }).sort((a, b) => (a.fuzzyParts ?? 0) - (b.fuzzyParts ?? 0) || (b.thread?.updatedAt ?? 0) - (a.thread?.updatedAt ?? 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
       const collisions = new Map<string, number>();
       for (const option of options) { const key = JSON.stringify([option.name, option.detail]); collisions.set(key, (collisions.get(key) ?? 0) + 1); }
       options = options.map((option) => (collisions.get(JSON.stringify([option.name, option.detail])) ?? 0) > 1

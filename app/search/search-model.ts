@@ -27,9 +27,42 @@ function queryAlternatives(part: string): string[] {
   return [...new Set([lower, [...lower].map((point) => otherLayout.get(point) ?? point).join("")])];
 }
 
+function differsByAtMostOneEdit(word: string[], query: string[]): boolean {
+  const [shorter, longer] = word.length <= query.length ? [word, query] : [query, word];
+  let index = 0;
+  while (index < shorter.length && shorter[index] === longer[index]) index++;
+  if (index === shorter.length) return true;
+  if (shorter.length < longer.length) {
+    return shorter.slice(index).every((letter, offset) => letter === longer[index + offset + 1]);
+  }
+  const sameTail = (start: number) => shorter.slice(start).every((letter, offset) => letter === longer[start + offset]);
+  return sameTail(index + 1) || (
+    shorter[index] === longer[index + 1] && shorter[index + 1] === longer[index] && sameTail(index + 2)
+  );
+}
+
+function approximateTitleRanges(title: string, terms: string[]): MatchRange[] {
+  const queries = terms.filter((term) => /^(?:[\p{L}\p{N}]\p{M}*){4,}$/u.test(term)).map((term) => [...term]);
+  if (!queries.length) return [];
+  const ranges: MatchRange[] = [];
+  for (const word of title.matchAll(/[\p{L}\p{M}\p{N}]+/gu)) {
+    const letters = [...word[0]];
+    for (const query of queries) {
+      // Try the same length before shorter or longer prefixes. Exact fragments are handled separately.
+      const lengths = [query.length, query.length + 1, query.length - 1];
+      const length = lengths.find((size) => size <= letters.length && differsByAtMostOneEdit(letters.slice(0, size), query));
+      if (length === undefined) continue;
+      ranges.push({ start: word.index, end: word.index + letters.slice(0, length).join("").length });
+      break;
+    }
+  }
+  return ranges;
+}
+
 // Map folded offsets back to entire original code points (İ and emoji included).
-export function matchTitle(title: string, query: string): MatchRange[] | null {
-  let folded = "";
+function matchParts(title: string, query: string, approximate = false): { ranges: MatchRange[]; fuzzyParts: number } | null {
+  const parts = query.split("/").filter((part) => part.length !== 0);
+  if (!parts.length) return { ranges: [], fuzzyParts: 0 };
   const starts: number[] = [], ends: number[] = [];
   let offset = 0;
   for (const point of title) {
@@ -37,20 +70,26 @@ export function matchTitle(title: string, query: string): MatchRange[] | null {
     for (let i = 0; i < lower.length; i++) {
       starts.push(offset); ends.push(offset + point.length);
     }
-    folded += lower;
     offset += point.length;
   }
-  folded = title.toLowerCase();
+  const folded = title.toLowerCase();
   const ranges: MatchRange[] = [];
-  for (const part of query.split("/").filter((part) => part.length !== 0)) {
+  let fuzzyParts = 0;
+  for (const part of parts) {
+    const alternatives = queryAlternatives(part);
     let found = false;
-    for (const term of queryAlternatives(part)) {
+    for (const term of alternatives) {
       for (let at = folded.indexOf(term); at !== -1; at = folded.indexOf(term, at + 1)) {
         found = true;
         ranges.push({ start: starts[at], end: ends[at + term.length - 1] });
       }
     }
-    if (!found) return null;
+    if (found) continue;
+    if (!approximate) return null;
+    const matches = approximateTitleRanges(folded, alternatives);
+    if (!matches.length) return null;
+    fuzzyParts++;
+    for (const match of matches) ranges.push({ start: starts[match.start], end: ends[match.end - 1] });
   }
   ranges.sort((a, b) => a.start - b.start || a.end - b.end);
   const merged: MatchRange[] = [];
@@ -59,15 +98,21 @@ export function matchTitle(title: string, query: string): MatchRange[] | null {
     if (last && range.start <= last.end) last.end = Math.max(last.end, range.end);
     else merged.push({ ...range });
   }
-  return merged;
+  return { ranges: merged, fuzzyParts };
 }
 
-export function matchThreadQuery(title: string, projectName: string, query: string): { titleRanges: MatchRange[]; projectRanges: MatchRange[] } | null {
+export function matchTitle(title: string, query: string): MatchRange[] | null {
+  return matchParts(title, query)?.ranges ?? null;
+}
+
+export function matchThreadQuery(title: string, projectName: string, query: string): { titleRanges: MatchRange[]; projectRanges: MatchRange[]; fuzzyParts?: number } | null {
   const colon = query.indexOf(":");
   const projectRanges = colon < 0 ? [] : matchTitle(projectName, query.slice(0, colon));
   if (projectRanges === null) return null;
-  const titleRanges = matchTitle(title, colon < 0 ? query : query.slice(colon + 1));
-  return titleRanges === null ? null : { titleRanges, projectRanges };
+  const titleMatch = matchParts(title, colon < 0 ? query : query.slice(colon + 1), true);
+  if (!titleMatch) return null;
+  const { ranges: titleRanges, fuzzyParts } = titleMatch;
+  return fuzzyParts === 0 ? { titleRanges, projectRanges } : { titleRanges, projectRanges, fuzzyParts };
 }
 
 export function filterProjectIds(filterId: string, document: FilterDocumentV1, projects: readonly SearchProject[]): Set<string> {

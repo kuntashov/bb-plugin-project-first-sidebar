@@ -2,6 +2,14 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import { readAcceptedProjection, type AcceptedProjection } from "./accepted-projection.js";
 import { executionProjectionSchema, type ExecutionProjection } from "../shared/execution-projection.js";
 
+export const EXECUTION_STORAGE_MIGRATIONS = [
+  `CREATE TABLE execution_projection (generation INTEGER NOT NULL, thread_id TEXT NOT NULL, state TEXT NOT NULL, reasoning_level TEXT, service_tier TEXT, accepted_id TEXT, accepted_seq INTEGER, request_id TEXT, request_seq INTEGER, error_reason TEXT, PRIMARY KEY (generation, thread_id))`,
+  `CREATE TABLE execution_job (id INTEGER PRIMARY KEY CHECK (id = 1), generation INTEGER NOT NULL, state TEXT NOT NULL, failure_scope TEXT, kind TEXT NOT NULL DEFAULT 'initial', epoch INTEGER NOT NULL DEFAULT 0)`,
+  `CREATE TABLE execution_manifest (generation INTEGER NOT NULL, thread_id TEXT NOT NULL, archived INTEGER NOT NULL, state TEXT NOT NULL, PRIMARY KEY (generation, thread_id))`,
+  `CREATE TABLE execution_meta (id INTEGER PRIMARY KEY CHECK (id = 1), active_generation INTEGER NOT NULL, initial_completed INTEGER NOT NULL DEFAULT 0)`,
+  `INSERT INTO execution_meta (id, active_generation) VALUES (1, 1)`,
+];
+
 export function createExecutionProjectionStore(bb: BbPluginApi) {
   const db = bb.storage.database();
   let storageFailure = false;
@@ -12,13 +20,7 @@ export function createExecutionProjectionStore(bb: BbPluginApi) {
   const reverified = new Set<string>();
   const failedIds = new Set<string>();
   const workingFailures = new Set<string>();
-  bb.storage.migrate(db, [
-    `CREATE TABLE execution_projection (generation INTEGER NOT NULL, thread_id TEXT NOT NULL, state TEXT NOT NULL, reasoning_level TEXT, service_tier TEXT, accepted_id TEXT, accepted_seq INTEGER, request_id TEXT, request_seq INTEGER, error_reason TEXT, PRIMARY KEY (generation, thread_id))`,
-    `CREATE TABLE execution_job (id INTEGER PRIMARY KEY CHECK (id = 1), generation INTEGER NOT NULL, state TEXT NOT NULL, failure_scope TEXT, kind TEXT NOT NULL DEFAULT 'initial', epoch INTEGER NOT NULL DEFAULT 0)`,
-    `CREATE TABLE execution_manifest (generation INTEGER NOT NULL, thread_id TEXT NOT NULL, archived INTEGER NOT NULL, state TEXT NOT NULL, PRIMARY KEY (generation, thread_id))`,
-    `CREATE TABLE execution_meta (id INTEGER PRIMARY KEY CHECK (id = 1), active_generation INTEGER NOT NULL, initial_completed INTEGER NOT NULL DEFAULT 0)`,
-    `INSERT INTO execution_meta (id, active_generation) VALUES (1, 1)`,
-  ]);
+  bb.storage.migrate(db, EXECUTION_STORAGE_MIGRATIONS);
   const active = () => (db.prepare("SELECT active_generation FROM execution_meta WHERE id = 1").get() as { active_generation: number }).active_generation;
   const job = () => db.prepare("SELECT generation, state, kind, epoch FROM execution_job WHERE id = 1").get() as { generation: number; state: string; kind: string; epoch: number } | undefined;
   const target = () => job()?.generation ?? active();

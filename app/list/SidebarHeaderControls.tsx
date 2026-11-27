@@ -32,6 +32,7 @@ export function SidebarHeaderControls({
   sectionId,
   onNewThread,
   showNewThread = true,
+  showNewSection = true,
   children,
   open,
   onOpenChange,
@@ -41,6 +42,7 @@ export function SidebarHeaderControls({
   sectionId?: SidebarSectionId;
   onNewThread?: () => void;
   showNewThread?: boolean;
+  showNewSection?: boolean;
   children?: ReactNode;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
@@ -103,6 +105,7 @@ export function SidebarHeaderControls({
             compact={compact}
             page={page}
             onPageChange={setPage}
+            showNewSection={showNewSection}
           >
             {children}
           </SidebarHeaderMenuContents>
